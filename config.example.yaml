@@ -1,0 +1,95 @@
+# SpeechForge configuration. Copy to <data dir>/config.yaml and edit. Every key
+# is optional; shown values are the defaults unless marked "rig:".
+#
+# Secrets do NOT go here. They live beside it in speechforge.env, by name:
+#   SPEECHFORGE_TOKEN   bearer token (`speechforge token new` writes it and shows it once;
+#                       `speechforge token rotate` keeps the old one valid for 5 minutes)
+#   SPEECHFORGE_SF_KEY  only if StudioForge has server.api_key set
+
+server:
+  hosts: ["127.0.0.1"]     # rig: add the machine's tailscale address (100.x.y.z). Never 0.0.0.0.
+  port: 1236
+  max_body_mb: 4
+  tls_cert: null           # only for a non-tailnet address (e.g. the LAN); then tls_key too
+  tls_key: null
+  upgrades_per_ip_per_min: 10
+
+gpu:
+  provider: cuda
+  devices: [3]             # PCI-bus order (StudioForge's numbering), preference order
+  expect_name: ""          # rig: "3090"
+  mem_limit_mb: 6144
+  min_driver: 580          # R580: the CUDA 13 runtime the ORT wheels need
+
+models:
+  # dir: D:\SpeechForge\models   # default <data dir>/models
+  tts_dtype: fp32          # fp16 only after the golden-audio + similarity check
+  stt_quantization: null   # null = Parakeet fp32 (GPU)
+  full_verify_days: 7      # full sha256 re-check of every model file at load after this long
+
+tts:
+  engine: chatterbox
+  first_chunk_tokens: 15
+  chunk_tokens: 25
+  left_context: 8
+  lookahead_tokens: 3
+  prompt_s: 4.0
+  max_http_streams: 1      # the HTTP utility route only
+
+stt:
+  engine: parakeet
+  max_audio_s: 30          # the HTTP utility routes only
+
+eou:
+  enabled: true            # Smart Turn v3.2 GPU at every >= min_pause_ms pause
+
+realtime:
+  max_sessions: 3
+  partial_ms: 160
+  min_pause_ms: 150
+  max_tail_s: 8
+  max_utterance_s: 60
+  max_ingest_ratio: 1.25
+  max_text_per_ctx: 2000
+  max_text_per_min: 20000
+  max_contexts: 2          # one active + one queued per session
+  default_ahead_ms: 3000   # credit: how far TTS may run ahead of playback
+  max_ahead_ms: 10000
+  idle_close_s: 30
+  resume_window_s: 10
+  error_flood: 50          # errors in error_window_s -> close 1008
+  error_window_s: 10
+  voice_puts_per_hour: 30
+  ready_wait_s: 20
+
+voices:
+  dir: null                # default %LOCALAPPDATA%\SpeechForge\voices (Windows), <data>/voices
+  max_bytes: 2097152
+  max_files: 256
+  allow_reference_clip: false   # D3: reference clips stay on the box
+
+selftest:
+  enabled: true
+  max_ttfa_ms: 250
+  max_cancel_ms: 50
+  max_stt_wer: 0.15
+  max_roundtrip_wer: 0.25
+
+residency:
+  idle_unload_s: 900
+  warm_on_boot: false
+  drain_timeout_s: 15
+  failure_cooldown_s: 60
+
+studioforge:
+  lease_mode: hold
+  url: http://127.0.0.1:1234
+  holder: speechforge
+  priority: 2              # never displaces an idle tier-1 (chat) model
+  vacate_url: ""           # default http://127.0.0.1:<port>/internal/vacate
+  timeout_s: 5
+  on_unreachable: proceed_if_free   # or refuse
+  unreachable_min_free_gib: 8
+  refusal_cooldown_s: 30
+  touch_interval_s: 30
+  vacate_cooldown_s: 180

@@ -1,0 +1,89 @@
+[project]
+name = "speechforge"
+# Calendar-free on purpose until the first rig deploy: 0.x means "the API may
+# still move". The display version lives in src/speechforge/__init__.py.
+version = "0.2.0"
+description = "A small GPU speech server: Parakeet TDT speech-to-text and Chatterbox-Turbo streaming text-to-speech over ONNX Runtime, cooperating with StudioForge through its GPU lease API."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+keywords = ["speech", "tts", "stt", "onnxruntime", "openai-compatible", "gpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+# The server itself: no ONNX Runtime here, so the test suite and a client
+# machine never pull 1+ GB of CUDA wheels. The rig installs the `gpu` extra.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "pydantic>=2.9",
+    "websockets>=13",
+]
+
+[project.optional-dependencies]
+# The rig: ONNX Runtime with the CUDA execution provider, its CUDA 13 / cuDNN 9
+# runtime as pip wheels (no system CUDA toolkit), the Parakeet front end, the
+# Chatterbox tokenizer, the model downloader and NVML for the card-name check.
+# >= 1.28: the CUDA 13 build (default from 1.27) with the preload_dlls() fix
+# for NVIDIA's CUDA 13 wheel layout on Windows; also clear of 1.23.0's missing
+# sm_120 code and of onnx-asr's exclusions (1.24.1, 1.25.*, 1.26.0). The upper
+# bound is the newest release tested against (DECISIONS S4).
+gpu = [
+    "onnxruntime-gpu[cuda,cudnn]>=1.28,<1.32",
+    "onnx-asr>=0.12",
+    "tokenizers>=0.20",
+    "huggingface-hub>=0.26",
+    "nvidia-ml-py>=12.560",
+]
+# A CPU-only box that wants to run the real models (development, parity checks).
+cpu = [
+    "onnxruntime>=1.28,<1.32",
+    "onnx-asr>=0.12",
+    "tokenizers>=0.20",
+    "huggingface-hub>=0.26",
+]
+dev = [
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "pytest-timeout>=2.3,<3",
+    "ruff==0.16.3",
+]
+
+[project.scripts]
+speechforge = "speechforge.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/speechforge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET"]
+ignore = ["B008", "SIM108"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+timeout = 120
+markers = [
+    "gpu: needs onnxruntime with the CUDA execution provider and the real models; skipped otherwise",
+    "models: needs the real model files (SPEECHFORGE_TEST_MODELS); skipped otherwise",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

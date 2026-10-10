@@ -1,0 +1,25 @@
+# Runtime data: config, token env file, models, voices, logs.
+/data/
+*.env
+local-env.bat
+# Scrub rules hold personal identifiers by design.
+scripts/scrub-rules.local.txt
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+# Weights and audio never ship.
+*.onnx
+*.onnx_data
+*.onnx.data
+*.npz
+*.wav
+*.bundle
+
+# The synthetic self-test clip ships (not a real person; assets/README.md).
+!src/speechforge/assets/selftest-voice.wav

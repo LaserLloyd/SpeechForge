@@ -1,0 +1,512 @@
+{
+ "lock_version": 1,
+ "note": "Every model file SpeechForge loads: pinned URL (revision in the path), size, sha256. Download verifies before rename; load re-verifies (DECISIONS S13). Generated 2026-10-10 from the Hugging Face tree API at the pinned revisions.",
+ "models": {
+  "chatterbox-turbo": {
+   "licence": "MIT (Resemble AI)",
+   "revision": "d21799bd0354adb85e348b8a0442a8405110a2cf"
+  },
+  "parakeet-tdt-0.6b-v2": {
+   "licence": "CC-BY-4.0 (NVIDIA); ONNX conversion by istupakov, CC-BY-4.0",
+   "revision": "0bbb45a3365852604aef28b538a8f066f4ccaa85"
+  },
+  "smart-turn-v3.2": {
+   "licence": "BSD-2-Clause (pipecat-ai)",
+   "revision": "f766f81d3cfdf7737ac64aad813d91bbfd56bf93"
+  },
+  "silero-vad-v5": {
+   "licence": "MIT (Silero)",
+   "revision": "1e261b036686cd0017d500ee96acd1c4ba572a9d"
+  }
+ },
+ "files": [
+  {
+   "groups": [
+    "tts-fp32",
+    "tts-fp16",
+    "tts-q4",
+    "tts-q4f16",
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/tokenizer.json",
+   "dest": "chatterbox-turbo/tokenizer.json",
+   "size": 3562272,
+   "sha256": "3f04e34bea22f9144d1a19151154095bc9ce0430bf421304f5797e716288a906"
+  },
+  {
+   "groups": [
+    "tts-fp32",
+    "tts-fp16",
+    "tts-q4",
+    "tts-q4f16",
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/config.json",
+   "dest": "chatterbox-turbo/config.json",
+   "size": 1188,
+   "sha256": "6b52ed838c3bc347ef519659d82fbd35b9ee805fc7a6da92fc46bc58dfa08770"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder.onnx",
+   "dest": "chatterbox-turbo/onnx/speech_encoder.onnx",
+   "size": 1172072,
+   "sha256": "4d66128037517dd51d370edc9b89ce36d42c75dcbd96e7216c7fb45dfae36045"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder.onnx_data",
+   "dest": "chatterbox-turbo/onnx/speech_encoder.onnx_data",
+   "size": 1044712832,
+   "sha256": "c9915ff6c529e7bb80983b525255e6744d6c39c7e35b12720925ba99ed0d0a2f"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens.onnx",
+   "dest": "chatterbox-turbo/onnx/embed_tokens.onnx",
+   "size": 2058,
+   "sha256": "27796e8252f36b463b0421cafdcc35b5f1e670ab0d96c9182f37ac6571c2f4bc"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens.onnx_data",
+   "dest": "chatterbox-turbo/onnx/embed_tokens.onnx_data",
+   "size": 232812544,
+   "sha256": "a1c37edc6ec6adb655351f02e958da297221b50211c2c01b69312cb6f008a293"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model.onnx",
+   "dest": "chatterbox-turbo/onnx/language_model.onnx",
+   "size": 207266,
+   "sha256": "c12e31df78c74f9589b165c8d51e65171f5028b77b7fedb41900f55f7f410dc8"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model.onnx_data",
+   "dest": "chatterbox-turbo/onnx/language_model.onnx_data",
+   "size": 1269724812,
+   "sha256": "67db106868f5354b2e425651f1791aef36ae3e6f00ac5e1d91e32c985cad6b39"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder.onnx",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder.onnx",
+   "size": 1889468,
+   "sha256": "8c43f3a1d0ddb1a86e226a244d7cda5396c67f5c6412789c23900c646e3ffc50"
+  },
+  {
+   "groups": [
+    "tts-fp32"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder.onnx_data",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder.onnx_data",
+   "size": 768593792,
+   "sha256": "05f162a519f3e9abaf0b7337ae037f4af8b2b30c4455d39b2c61ed3a9b2b5476"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_fp16.onnx",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_fp16.onnx",
+   "size": 1189888,
+   "sha256": "5544f87c3e1615a31f5dc3ccdf9ba52a9f5fb8f6018e72796235fc1cfd5ebc9f"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_fp16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_fp16.onnx_data",
+   "size": 522307136,
+   "sha256": "d24b817ff61489373ab13033cbdc28a5ba8347341248a00f9a63f10888e81d73"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_fp16.onnx",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_fp16.onnx",
+   "size": 1754,
+   "sha256": "f7a7a83e91337e10add2fad054544421f9080e27b72af1aef27f339a1a66776c"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_fp16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_fp16.onnx_data",
+   "size": 116406272,
+   "sha256": "cdda886a9e58ad39059fe8f6cf5a3a628994a1a2dfc1a8b58502c252fec70327"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_fp16.onnx",
+   "dest": "chatterbox-turbo/onnx/language_model_fp16.onnx",
+   "size": 209456,
+   "sha256": "396b35570dd1dbc5f537ffc932c3e69130ab8a09bf1390469d92338c8eae7da4"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_fp16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/language_model_fp16.onnx_data",
+   "size": 634862406,
+   "sha256": "d730d6437126d3e232747b26e2a7adece68844f22133277ca5012298ffe36f93"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_fp16.onnx",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_fp16.onnx",
+   "size": 2104016,
+   "sha256": "cbdc0281548eb90a02fa2430647237df63fa0cb695e42b91c10b860b9b6d2230"
+  },
+  {
+   "groups": [
+    "tts-fp16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_fp16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_fp16.onnx_data",
+   "size": 384019328,
+   "sha256": "c6c3e79e6ff86bc41f77381a3d67b8edaa16b13e43a2700ca8159d0894bd594a"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_q4.onnx",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_q4.onnx",
+   "size": 1200346,
+   "sha256": "37956c20b67bed85a0da4bc83509d67b5969a1b257d1c546516a5236a17ad71e"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_q4.onnx_data",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_q4.onnx_data",
+   "size": 229560112,
+   "sha256": "58956db217c6443e49c91bdd54d7cf76b4a243f225c748b7bf746459fc27bc7d"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_q4.onnx",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_q4.onnx",
+   "size": 2844,
+   "sha256": "fd6ba1d22902e8f539d3dd6d7c1c44b98ebb4c84ebbb5e47fcb826ddcf667561"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_q4.onnx_data",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_q4.onnx_data",
+   "size": 37286384,
+   "sha256": "f54a51e234b509b64c3a03bb79e1149fba7e2eba6c2d9c222f18883379e1f5d8"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_q4.onnx",
+   "dest": "chatterbox-turbo/onnx/language_model_q4.onnx",
+   "size": 274572,
+   "sha256": "b39d03d3f8b943b9e60c6fce3fb41191dbc1df4589f913291db1e214eef669b1"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_q4.onnx_data",
+   "dest": "chatterbox-turbo/onnx/language_model_q4.onnx_data",
+   "size": 204456572,
+   "sha256": "2c029dc0acf48752473d8c74c72b5ceaaad76b9886fe106eaf2022142d5b5d5e"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_q4.onnx",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_q4.onnx",
+   "size": 2179022,
+   "sha256": "dccb7a6cea3472dc7f7d070eeb70ade18e6327fb4ec61a3d62cf211bfed90ea2"
+  },
+  {
+   "groups": [
+    "tts-q4"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_q4.onnx_data",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_q4.onnx_data",
+   "size": 246397384,
+   "sha256": "b5c5317e0b79a1a19dd3d5e2b2091ea06b15716716ab801a54eaeb906c6971ec"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_q4f16.onnx",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_q4f16.onnx",
+   "size": 1217655,
+   "sha256": "004407d26127c1d8e974bd213ecff8dbe67611527ca7a1930e656b80d9c51125"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_q4f16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_q4f16.onnx_data",
+   "size": 177289008,
+   "sha256": "c017ab57887418e0609afdef52b0cbc17f43cb304e78af44300c0292cd2b2fa9"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_q4f16.onnx",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_q4f16.onnx",
+   "size": 2548,
+   "sha256": "e5c9507c89e770e35d68bdd669e4ae44b34272232e84f010f2c97959feae79b3"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_q4f16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_q4f16.onnx_data",
+   "size": 33648688,
+   "sha256": "37e96447b5f3ef46f46fb35cc599cfcb95b277e5528cc0c89bab78169da620ef"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_q4f16.onnx",
+   "dest": "chatterbox-turbo/onnx/language_model_q4f16.onnx",
+   "size": 276803,
+   "sha256": "4c5d83674c52bb71683a1ea1f60e2608b80cda48aafce67e8f8c03162c474ad5"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_q4f16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/language_model_q4f16.onnx_data",
+   "size": 183981430,
+   "sha256": "f084f21f977e365e76e622d2958c309ff894537f7b7133ac7fc5ce8fc055d6f9"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_q4f16.onnx",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_q4f16.onnx",
+   "size": 2394210,
+   "sha256": "17c9f7caef818605df2dc197c2f41682c0bda7fe437b8652dae8366de8b68b7e"
+  },
+  {
+   "groups": [
+    "tts-q4f16"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_q4f16.onnx_data",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_q4f16.onnx_data",
+   "size": 162996136,
+   "sha256": "3e53cc7cc05e72957797c620e1bf0c6d6b909df937de4756c6e534d50854ca3e"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_quantized.onnx",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_quantized.onnx",
+   "size": 1205728,
+   "sha256": "5b6f15870a43cf97892df86fc550a0ef4763522d527cde72b2a4316f80a34de4"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/speech_encoder_quantized.onnx_data",
+   "dest": "chatterbox-turbo/onnx/speech_encoder_quantized.onnx_data",
+   "size": 354676576,
+   "sha256": "d59861fb55e806fbeee731da9d4f8ff819fb5735de5d15e262d902594ee4dbb6"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_quantized.onnx",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_quantized.onnx",
+   "size": 2887,
+   "sha256": "0efe1bc01c2c48a98425a74444fd9887924d887f922c2722a6ec961ebb9e1db6"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/embed_tokens_quantized.onnx_data",
+   "dest": "chatterbox-turbo/onnx/embed_tokens_quantized.onnx_data",
+   "size": 67297376,
+   "sha256": "9025d04c124899823124b1d7bb7069b1f535fb8a6c2d88f97520eb6fecced986"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_quantized.onnx",
+   "dest": "chatterbox-turbo/onnx/language_model_quantized.onnx",
+   "size": 279670,
+   "sha256": "0b40581277e30b7034331ec8c3ad47ed71d321f015b387a95221e54e2fcbfde8"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/language_model_quantized.onnx_data",
+   "dest": "chatterbox-turbo/onnx/language_model_quantized.onnx_data",
+   "size": 367962860,
+   "sha256": "ec9945df36cb5d131d46688f2609fd715fbfcb0b8ee9681af5c84118de2d55a2"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_quantized.onnx",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_quantized.onnx",
+   "size": 2202035,
+   "sha256": "2af3b150196d9d559cd3c91e03da80eb27a466032369dc2b57ea729cddad3ebb"
+  },
+  {
+   "groups": [
+    "tts-q8"
+   ],
+   "url": "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/d21799bd0354adb85e348b8a0442a8405110a2cf/onnx/conditional_decoder_quantized.onnx_data",
+   "dest": "chatterbox-turbo/onnx/conditional_decoder_quantized.onnx_data",
+   "size": 326548688,
+   "sha256": "4918ca09e05e41d2b4aa1ace6201d1cd911ffc58a42801002bab177d495cfe0a"
+  },
+  {
+   "groups": [
+    "stt-fp32",
+    "stt-int8"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/config.json",
+   "dest": "parakeet-tdt-0.6b-v2/config.json",
+   "size": 97,
+   "sha256": "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"
+  },
+  {
+   "groups": [
+    "stt-fp32",
+    "stt-int8"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/vocab.txt",
+   "dest": "parakeet-tdt-0.6b-v2/vocab.txt",
+   "size": 9384,
+   "sha256": "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+  },
+  {
+   "groups": [
+    "stt-fp32",
+    "stt-int8"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/nemo128.onnx",
+   "dest": "parakeet-tdt-0.6b-v2/nemo128.onnx",
+   "size": 139764,
+   "sha256": "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"
+  },
+  {
+   "groups": [
+    "stt-fp32"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx",
+   "dest": "parakeet-tdt-0.6b-v2/encoder-model.onnx",
+   "size": 41770866,
+   "sha256": "3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3"
+  },
+  {
+   "groups": [
+    "stt-fp32"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx.data",
+   "dest": "parakeet-tdt-0.6b-v2/encoder-model.onnx.data",
+   "size": 2435420160,
+   "sha256": "4dab7362d4874d85965045b1e41b2d61dd2cc0fb25671a7f6b3dc47bf120cc41"
+  },
+  {
+   "groups": [
+    "stt-fp32"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/decoder_joint-model.onnx",
+   "dest": "parakeet-tdt-0.6b-v2/decoder_joint-model.onnx",
+   "size": 35792059,
+   "sha256": "cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191"
+  },
+  {
+   "groups": [
+    "stt-int8"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.int8.onnx",
+   "dest": "parakeet-tdt-0.6b-v2/encoder-model.int8.onnx",
+   "size": 652184014,
+   "sha256": "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155"
+  },
+  {
+   "groups": [
+    "stt-int8"
+   ],
+   "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/decoder_joint-model.int8.onnx",
+   "dest": "parakeet-tdt-0.6b-v2/decoder_joint-model.int8.onnx",
+   "size": 8998286,
+   "sha256": "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3"
+  },
+  {
+   "groups": [
+    "eou-gpu"
+   ],
+   "url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-gpu.onnx",
+   "dest": "smart-turn/smart-turn-v3.2-gpu.onnx",
+   "size": 32411198,
+   "sha256": "ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be"
+  },
+  {
+   "groups": [
+    "eou-cpu"
+   ],
+   "url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx",
+   "dest": "smart-turn/smart-turn-v3.2-cpu.onnx",
+   "size": 8679182,
+   "sha256": "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"
+  },
+  {
+   "groups": [
+    "vad"
+   ],
+   "url": "https://github.com/snakers4/silero-vad/raw/1e261b036686cd0017d500ee96acd1c4ba572a9d/src/silero_vad/data/silero_vad.onnx",
+   "dest": "silero-vad/silero_vad.onnx",
+   "size": 2327524,
+   "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+  }
+ ]
+}
