@@ -395,3 +395,13 @@ whether the card's used memory returns to its baseline after `close()` -- an env
 outlives the sessions, so if it keeps its chunks the default must become `false` for a tenant
 that gives the card back (S3), or the unload must shrink it. The decision stands as "on by default"
 only if the load gets faster and the footprint and TTFA hold.
+
+**Measured 2026-10-11 (RTX 5090, fp16, `scripts/gpu_cold_load.py`, two runs each).** Shared arena:
+sessions 12.4 / 12.9 s, warm-up 32.8 / 15.3 s, footprint after warm-up 6.7 GB, **after close 6.3 GB
+(5.5 GB held)**. Per-session arenas: sessions 14.7 / 11.7 s, warm-up 35.9 / 21.1 s, footprint
+7.9 GB, after close 1.4 GB. The shared arena saves ~15 % of warm-up and 1.2 GB while serving, but
+ONNX Runtime cannot unregister an environment allocator, so the memory stays on the card after the
+models unload -- which is exactly when a lease-returning tenant (S3) must give the card back.
+**Default `gpu.shared_arena: false`**; the code stays behind the flag for a deployment that never
+unloads (or that exits the process to unload). The cold-load answer remains the Open list in
+docs/BENCHMARKS.md.

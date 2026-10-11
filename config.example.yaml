@@ -20,7 +20,7 @@ gpu:
   expect_name: ""          # rig: "3090"
   mem_limit_mb: 6144       # per-session arena cap; the shared arena's cap is twice this
   min_driver: 580          # R580: the CUDA 13 runtime the ORT wheels need
-  shared_arena: true       # one ONNX Runtime arena for every session on the card, made once at
+  shared_arena: false       # one ONNX Runtime arena for every session on the card, made once at
                            # load (S24); false = one arena per session (S22). /ready reports it.
   arena_initial_mb: 2047   # the shared arena's first chunk, 64-2047 (the runtime's field is a
                            # 32-bit int, so 2047 MiB is the most it takes)
