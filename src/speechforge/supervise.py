@@ -10,7 +10,10 @@
   crash loop instead of a refused connection;
 * restarts it when ``/health`` fails 3 probes in a row (a wedged driver call);
 * restarts it on request: ``<data>/state/restart.request`` (written by
-  ``speechforge update --apply`` after it switched the ``current`` release);
+  ``speechforge update --apply`` after it switched the ``current`` release,
+  and by the tray's "Restart server");
+* stops on request: ``<data>/state/stop.request`` (the tray's "Stop server":
+  a console signal cannot reach a child that runs without a console);
 * stops it gracefully on exit (CTRL_BREAK on Windows, SIGINT elsewhere; the
   child releases its StudioForge lease on the way out), then terminate, kill.
 
@@ -93,7 +96,7 @@ class CrashTracker:
         return len(self.times) >= self.limit
 
 
-def serve_crashloop(port: int, stop: threading.Event) -> None:
+def serve_crashloop(port: int, stop: threading.Event, stop_file: Path | None = None) -> None:
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             body = json.dumps({"ok": False, "state": "crashloop"}).encode()
@@ -111,6 +114,10 @@ def serve_crashloop(port: int, stop: threading.Event) -> None:
         srv.timeout = 1
         while not stop.is_set():
             srv.handle_request()
+            if stop_file is not None and stop_file.exists():
+                with contextlib.suppress(OSError):
+                    stop_file.unlink()
+                stop.set()
 
 
 def supervise(
@@ -129,9 +136,11 @@ def supervise(
     crashes = CrashTracker()
     state_dir.mkdir(parents=True, exist_ok=True)
     restart_file = state_dir / "restart.request"
+    stop_file = state_dir / "stop.request"
     crash_file = state_dir / "crashloop.json"
-    with contextlib.suppress(OSError):
-        crash_file.unlink()
+    for stale in (crash_file, stop_file):
+        with contextlib.suppress(OSError):
+            stale.unlink()
 
     def _on_signal(signum: int, _frame: Any) -> None:
         stopping.set()
@@ -151,6 +160,12 @@ def supervise(
         requested = False
         while not stopping.is_set() and proc.poll() is None:
             time.sleep(1.0)
+            if stop_file.exists():
+                with contextlib.suppress(OSError):
+                    stop_file.unlink()
+                log.info("stop requested")
+                stopping.set()
+                break
             if restart_file.exists():
                 with contextlib.suppress(OSError):
                     restart_file.unlink()
@@ -191,7 +206,7 @@ def supervise(
             crash_file.write_text(
                 json.dumps({"state": "crashloop", "at": time.time(), "last_exit": code})
             )
-            serve_crashloop(port, stopping)
+            serve_crashloop(port, stopping, stop_file)
             return 1
         log.warning("server exited with code %s; restarting in %.0f s", code, backoff)
         stopping.wait(backoff)
