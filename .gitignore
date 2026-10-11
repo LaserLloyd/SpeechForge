@@ -23,3 +23,13 @@ build/
 
 # The synthetic self-test clip ships (not a real person; assets/README.md).
 !src/speechforge/assets/selftest-voice.wav
+
+# Listening-test kit output (docs/LISTENING-TEST.md): the family's renders,
+# the blind set, the ratings and the key never enter the repository.
+tools/listening/**/*.wav
+tools/listening/out/
+ratings/
+key.json
+render.json
+manifest.json
+report.md

@@ -8,19 +8,54 @@ Layout after `install.ps1`: `C:\SpeechForge\releases\<tag>\` (a clone + its `.ve
 ## First install (one manual step on the host)
 
 1. Prerequisites: Windows 11, NVIDIA driver R580 or newer, Tailscale running, git, ~20 GB free.
-2. Copy `speechforge.bundle` and `install.ps1` to the host.
+2. Get `install.ps1` onto the host (download it from the repository, or copy it along with a
+   `speechforge.bundle` for an offline install).
 3. Elevated PowerShell:
-   `powershell -ExecutionPolicy Bypass -File install.ps1 -Bundle <path>\speechforge.bundle -BoxAddress <box tailnet IP>`
-   It checks Windows/driver/disk/tailscale, installs uv, creates the layout, runs
+   `powershell -ExecutionPolicy Bypass -File install.ps1 -BoxAddress <box tailnet IP>`
+   installs the newest `v*` tag from `https://github.com/LaserLloyd/SpeechForge.git`
+   (`git ls-remote --tags`, version order, then `git clone --branch <tag> --depth 1`).
+   Options: `-Source <git URL | bundle | clone path>` (offline or a fork; `-Bundle` still
+   works), `-Tag v0.2.0`, `-Root` (default `C:\SpeechForge`), `-DataDir` (default
+   `<Root>\data`; elsewhere is remembered in `<Root>\local-env.bat`), `-Device`, `-ExpectName`,
+   `-Port`, `-SkipFirewall`, `-SkipStartup`.
+   It checks Windows/driver/disk/git/tailscale, installs uv, creates the layout, runs
    `uv sync --locked --extra gpu`, writes `config.yaml` (binds 127.0.0.1 + the host's tailnet
    address, `gpu.devices: [3]`, `expect_name: "3090"`), downloads and hash-verifies the models
    (~6 GB), creates the voices folder (user-only ACL, not indexed), **prints the token once**,
    adds the firewall rule (TCP 1236, local = tailnet address, remote = the box only) and the
    mini-dump key, installs the Startup-folder launcher and runs `doctor`.
+   Without `-BoxAddress` the rule admits the whole tailnet range `100.64.0.0/10`: every device
+   on the tailnet (including nodes shared into it) can reach the port and only the bearer token
+   stops them. Narrow it later by re-running with `-BoxAddress`.
+   Re-running the installer is safe: an existing `releases\<tag>` is reused and said so,
+   `config.yaml` and the token are left untouched (the token's fingerprint is printed instead),
+   the firewall rule and the Startup launcher are rewritten.
 4. Copy the printed token to the box (`SPEECHFORGE_TOKEN=` in the add-on's env file). Never
    paste it into a chat or a commit.
 5. Start it: `C:\SpeechForge\current\launchers\Start SpeechForge.bat` (or log off and on).
 6. From the box: `curl http://<host tailnet IP>:1236/health` -> `{"ok":true,...}`.
+
+## Run from a checkout (developer layout)
+
+A plain `git clone` works without `releases\<tag>` + `current`: the data folder is wherever
+`SPEECHFORGE_DATA_DIR` points (default `<repo>\data`), and `doctor` reports
+`layout checkout ...` instead of looking for a junction. Keep the data outside the repo so a
+checkout, reset or worktree never touches models, token or logs.
+
+```
+set SPEECHFORGE_DATA_DIR=D:\SpeechForge\data      (or copy launchers\local-env.example.bat
+                                                   to <repo>\local-env.bat and set it there)
+uv sync --extra gpu
+uv run speechforge doctor
+uv run speechforge supervise                      (or launchers\Start SpeechForge.bat)
+```
+
+The first start needs the same one-time pieces as the installer: `config.yaml` in the data
+dir, `uv run speechforge fetch-models`, `uv run speechforge token new`, and a firewall rule
+if the box connects over the tailnet. New code arrives with `git fetch` + `git checkout <tag>`
+and a fresh `uv sync` -- `speechforge update` is for the installed layout only
+(`update --check` still answers from a checkout). The two layouts must not run at once: they
+share the port and the StudioForge lease.
 
 ## Measuring (phase 0 / the ship gate)
 
@@ -46,9 +81,16 @@ Layout after `install.ps1`: `C:\SpeechForge\releases\<tag>\` (a clone + its `.ve
 
 ## Update (blue/green) and rollback
 
-`C:\SpeechForge\current\launchers\Update SpeechForge.bat <path>\speechforge.bundle [tag]`:
+`C:\SpeechForge\current\launchers\Update SpeechForge.bat [source] [tag]`, or
+`PY -m speechforge update --check` then `--apply [--source URL|PATH] [--tag T]`. The source
+defaults to the running release's `origin` (the public repository after a default install, the
+bundle after an offline one) and falls back to the GitHub URL; `--bundle` is the old name of
+`--source`. `--check` lists the `v*` tags at the source (one `git ls-remote`, nothing fetched).
+`--apply`:
 
-1. clones the tag into `releases\<tag>` and runs `uv sync --locked --extra gpu`;
+1. checks the tag exists at the source, clones it into `releases\<tag>`
+   (`git clone --branch <tag> --depth 1`; never a `git pull` in place) and runs
+   `uv sync --locked --extra gpu`;
 2. fetches any model file the new lock adds (shared files are hash-checked, not re-fetched);
 3. starts the new release as a canary on `127.0.0.1:1237` (no lease; it shares the card) and
    gates it over sf.1: `ready` (= self-test passed), a TTS round trip with TTFA <= 250 ms, a

@@ -33,6 +33,51 @@ from speechforge.voices import VoiceTensors
 CROSSFADE_SAMPLES = 24000 * 20 // 1000
 TRAILING_SILENCE = 3
 
+# Long-lived worker threads (measured on the rig, DECISIONS S18): ONNX Runtime's
+# CUDA provider builds a per-thread context (cuBLAS/cuDNN handles) the first
+# time a thread runs a session, 300-450 ms a time. A thread per sentence paid
+# that on every first chunk, so TTFA was bimodal (50 ms or 450 ms for the same
+# decode). The LM producers and the decoder keep their threads across sentences.
+_LM_POOL: ThreadPoolExecutor | None = None
+_DEC_POOL: ThreadPoolExecutor | None = None
+_POOL_LOCK = threading.Lock()
+LM_WORKERS = 8  # >= realtime.max_sessions x max_contexts (3 x 2) plus warm-up/HTTP
+
+
+def _pools() -> tuple[ThreadPoolExecutor, ThreadPoolExecutor]:
+    global _LM_POOL, _DEC_POOL
+    with _POOL_LOCK:
+        if _LM_POOL is None:
+            _LM_POOL = ThreadPoolExecutor(max_workers=LM_WORKERS, thread_name_prefix="sf-tts-lm")
+        if _DEC_POOL is None:
+            _DEC_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sf-tts-dec")
+        return _LM_POOL, _DEC_POOL
+
+
+def decode_pool() -> ThreadPoolExecutor:
+    """The decoder's long-lived single worker (warm-ups run on it too)."""
+    return _pools()[1]
+
+
+def warm_lm_workers(fn: Callable[[], Any], *, barrier_timeout_s: float = 30.0) -> int:
+    """Run ``fn`` once on every LM worker thread (all held at a barrier so each
+    lands on a distinct thread): the per-thread CUDA context is then built at
+    load, never on a caller's first token. Returns how many threads ran it.
+
+    A worker busy with a sentence cannot reach the barrier; when it times out
+    the others still run ``fn`` on whatever thread they hold rather than failing
+    the load, so a warm-up under load degrades to fewer warmed threads."""
+    pool = _pools()[0]
+    barrier = threading.Barrier(LM_WORKERS)
+
+    def task() -> None:
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait(timeout=barrier_timeout_s)
+        fn()
+
+    futures = [pool.submit(task) for _ in range(LM_WORKERS)]
+    return sum(1 for f in futures if f.result(timeout=120.0) is None)
+
 
 @dataclass(frozen=True)
 class ChunkPlanConfig:
@@ -41,6 +86,15 @@ class ChunkPlanConfig:
     left: int = 8
     lookahead: int = 3
     prompt_s: float = 4.0
+    #: Rate-aware chunking (DECISIONS S21): after the first chunk, the next chunk
+    #: is sized so that generating it (at the token rate measured so far, plus one
+    #: decode) finishes ``margin_ms`` before the audio already emitted runs out.
+    #: A fixed 25-token second chunk behind a 10-token first chunk gapped on
+    #: every sentence once two sessions shared the LM (26 ms/token).
+    adaptive: bool = True
+    margin_ms: int = 100
+    decode_ms: int = 60
+    min_chunk: int = 6
 
 
 class Plan:
@@ -137,7 +191,7 @@ def pipelined(
                     stats["first_token_ms"] = round((time.perf_counter() - t0) * 1000)
                 if isinstance(lm_stop, _Gated):
                     lm_stop.count = n
-                events.put(("tok", tok))
+                events.put(("tok", (tok, time.perf_counter())))
                 if halt.is_set():
                     break
             if on_lm_done is not None and not halt.is_set():
@@ -147,14 +201,16 @@ def pipelined(
         finally:
             events.put(("done", None))
 
-    th = threading.Thread(target=lm, name="sf-tts-lm", daemon=True)
-    th.start()
+    lm_pool, pool = _pools()
+    th = lm_pool.submit(lm)
     sched = Plan(plan.first, plan.chunk, plan.left, plan.lookahead)
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sf-tts-dec")
     pending: list[Future[np.ndarray]] = []
     held: np.ndarray | None = None
     emitted = 0
     done = False
+    tok_times: list[float] = []
+    t_first_emit: float | None = None
+    stats["chunk_tokens"] = []
     try:
         while True:
             if stop is not None and stop.is_set():
@@ -163,7 +219,8 @@ def pipelined(
                 kind, item = events.get(timeout=0.002 if pending else 0.05)
                 while True:
                     if kind == "tok":
-                        tokens.append(item)
+                        tokens.append(item[0])
+                        tok_times.append(item[1])
                     else:
                         done = True
                     kind, item = events.get_nowait()
@@ -172,9 +229,14 @@ def pipelined(
             if lm_error:
                 raise lm_error[0]
             if not pending:
+                if plan.adaptive and sched.n_chunks and t_first_emit is not None:
+                    sched.chunk = _adaptive_chunk(
+                        plan, tok_times, len(tokens) - sched.decoded_upto, emitted, t_first_emit
+                    )
                 nxt = sched.next_chunk(len(tokens), done)
                 if nxt is not None:
                     s, e, lc, look = nxt
+                    stats["chunk_tokens"].append(e - look - s - lc)
                     last = done and e >= len(tokens) and look == 0
                     pending.append(
                         pool.submit(
@@ -208,6 +270,7 @@ def pipelined(
                 if len(out):
                     if stats["first_chunk_ms"] is None:
                         stats["first_chunk_ms"] = round((time.perf_counter() - t0) * 1000)
+                        t_first_emit = time.perf_counter()
                     emitted += len(out)
                     yield float_to_pcm16(out)
             if done and sched.decoded_upto >= len(tokens) and not pending:
@@ -219,11 +282,37 @@ def pipelined(
         halt.halt()
         # Wait for a decode already running: "GPU idle for that gen" (the cancel
         # stop_ms) must include it, not just the LM thread noticing the stop.
-        pool.shutdown(wait=True, cancel_futures=True)
-        th.join(timeout=5.0)
+        # The pools outlive the sentence (see _pools), so wait on the futures.
+        for fut in pending:
+            if not fut.cancel():
+                with contextlib.suppress(BaseException):
+                    fut.result(timeout=5.0)
+        with contextlib.suppress(BaseException):
+            th.result(timeout=5.0)
         stats["tokens"] = len(tokens)
         stats["audio_ms"] = round(emitted / 24000 * 1000)
         stats["total_ms"] = round((time.perf_counter() - t0) * 1000)
+
+
+def _adaptive_chunk(
+    plan: ChunkPlanConfig, tok_times: list[float], avail: int, emitted: int, t_first_emit: float
+) -> int:
+    """Tokens for the next chunk: as many as the emitted audio can cover.
+
+    The chunk is ready after its missing tokens arrive (``avail`` are already here) at
+    the measured step time, plus one decode; the audio runs out ``emitted`` samples
+    after the first emission. Clamped to ``[min_chunk, chunk]``."""
+    if len(tok_times) < 3:
+        return plan.chunk
+    recent = tok_times[-21:]
+    step_s = float(np.median(np.diff(recent)))
+    if step_s <= 0:
+        return plan.chunk
+    runout = t_first_emit + emitted / 24000
+    budget_s = runout - time.perf_counter() - (plan.margin_ms + plan.decode_ms) / 1000
+    fit = int(budget_s / step_s) if budget_s > 0 else 0
+    size = (avail - plan.lookahead) + fit
+    return max(plan.min_chunk, min(plan.chunk, size))
 
 
 class _Either:

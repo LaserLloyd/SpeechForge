@@ -107,12 +107,29 @@ class RigClient:
     async def send(self, msg: dict[str, Any]) -> None:
         await self.ws.send(dumps(msg))
 
-    async def send_mic(self, pcm16: np.ndarray, *, realtime: bool = False) -> None:
-        for frame in mic_frames(np.asarray(pcm16, "<i2"), self.mic_pts):
-            await self.ws.send(frame)
+    async def send_mic(
+        self, pcm16: np.ndarray, *, realtime: bool = False, mark_pts: int | None = None
+    ) -> float | None:
+        """Send mic frames; with ``realtime`` pace them at 20 ms per frame against a
+        deadline schedule (``asyncio.sleep(0.02)`` per frame overshoots to ~31 ms on
+        Windows' 15.6 ms timer and ran the stream at two thirds of real time).
+        Returns the wall time (``perf_counter``) at which the frame carrying the
+        sample ``mark_pts`` went out, so a harness measures from the true speech end."""
+        pcm = np.asarray(pcm16, "<i2")
+        start = self.mic_pts
+        t0 = time.perf_counter()
+        marked: float | None = None
+        for i, frame in enumerate(mic_frames(pcm, start)):
             if realtime:
-                await asyncio.sleep(0.02)
-        self.mic_pts += len(pcm16)
+                delay = t0 + i * 0.02 - time.perf_counter()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            await self.ws.send(frame)
+            end_pts = start + min(len(pcm), (i + 1) * 320)
+            if marked is None and mark_pts is not None and end_pts >= mark_pts:
+                marked = time.perf_counter()
+        self.mic_pts += len(pcm)
+        return marked
 
     def ctx_pcm(self, ctx: int) -> np.ndarray:
         frames = [f.pcm for _, f in self.audio.get(ctx, [])]

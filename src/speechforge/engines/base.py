@@ -1,4 +1,4 @@
-"""The two adapter interfaces every model plugs in behind, and the registry.
+"""The adapter interfaces every model plugs in behind, and the registry.
 
 The server (transport, residency, leases, voice store) never touches a model
 API directly; it talks to one :class:`SttAdapter` and one :class:`TtsAdapter`,
@@ -33,6 +33,53 @@ class SttAdapter(Protocol):
     def describe(self) -> dict[str, Any]: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class SttStreamHandle(Protocol):
+    """One open utterance on a cache-aware streaming model (one per session).
+
+    ``feed`` takes float32 16 kHz mono frames in arrival order and returns the
+    current partial text for everything fed since the last ``reset``;
+    ``finalize`` flushes the model (tail padding, end of input) and returns
+    the final text plus ``(word, start_s, end_s)`` timings relative to the
+    first sample fed since the last ``reset`` -- ``[]`` when the model has
+    none. After ``finalize`` the handle must be ``reset`` before more audio.
+    """
+
+    def feed(self, audio: np.ndarray) -> str: ...
+
+    def finalize(self) -> tuple[str, list[tuple[str, float, float]]]: ...
+
+    def reset(self) -> None: ...
+
+
+@runtime_checkable
+class StreamingSttAdapter(Protocol):
+    """An :class:`SttAdapter` whose model decodes each frame once (cache-aware
+    streaming). ``stt_stream`` feeds it at the ``partial_ms`` cadence instead
+    of re-decoding the open tail; ``transcribe`` still works (one stream,
+    fed whole, finalized) so every ``SttAdapter`` caller is unchanged."""
+
+    name: str
+    sample_rate: int
+
+    def create_stream(self) -> SttStreamHandle: ...
+
+    def transcribe(self, audio: np.ndarray) -> str: ...
+
+    def warm_up(self) -> None: ...
+
+    def describe(self) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
+
+def is_streaming_stt(adapter: Any) -> bool:
+    """True when the loaded STT adapter streams (duck-typed: a fake with
+    ``create_stream`` counts; a protocol isinstance check would also accept
+    any object with the attribute, so this is the same test said plainly)."""
+    return callable(getattr(adapter, "create_stream", None))
 
 
 @runtime_checkable
@@ -90,8 +137,11 @@ def register_tts(
 
 def builtin() -> None:
     """Register the engines that ship with SpeechForge."""
-    from speechforge.engines import chatterbox_tts, parakeet
+    from speechforge.engines import chatterbox_tts, dots_tts, nemotron, parakeet, qwen3_tts
     from speechforge.voices import parse_npz
 
     register_stt("parakeet", parakeet.load)
+    register_stt("nemotron", nemotron.load)
     register_tts("chatterbox", chatterbox_tts.load, parse_npz)
+    register_tts("qwen3-tts", qwen3_tts.load, qwen3_tts.parse_voice)
+    register_tts("dots-tts", dots_tts.load, dots_tts.parse_voice)

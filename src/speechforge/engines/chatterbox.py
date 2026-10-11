@@ -47,6 +47,15 @@ TOKENS_PER_SECOND = 25
 SAMPLE_RATE = 24000
 #: 960 samples of 24 kHz audio per speech token (measured by the add-on).
 SAMPLES_PER_TOKEN = SAMPLE_RATE // TOKENS_PER_SECOND
+#: Decoder sequence lengths (speech tokens incl. context and trailing silence)
+#: are padded up to one of these with SILENCE tokens whose audio is dropped.
+#: Measured on the host (DECISIONS S18): the CUDA provider pays 150-700 ms the
+#: first time it sees a shape AND ~200 ms on every switch between shapes it has
+#: already seen, while the decode itself costs ~55 ms whether the input is 8 or
+#: 40 tokens. So every chunk the plan can produce (first 15+3, middle 8+25+3,
+#: last <= 38, plus 3 silence) is padded to ONE shape; 64 only catches an
+#: oversized chunk. Warm-up decodes each bucket once.
+DECODE_BUCKETS: tuple[int, ...] = (40, 64)
 COMPONENTS = ("speech_encoder", "embed_tokens", "language_model", "conditional_decoder")
 DTYPES = ("fp32", "fp16", "q8", "q4", "q4f16")
 
@@ -127,6 +136,8 @@ class ChatterboxEngine:
     time (``_dec_lock``) -- the two overlap, which is the pipeline (S5)."""
 
     sample_rate = SAMPLE_RATE
+    #: Class-level so fakes built without __init__ (tests) get the default too.
+    decode_buckets: tuple[int, ...] = DECODE_BUCKETS
 
     def __init__(
         self,
@@ -264,6 +275,15 @@ class ChatterboxEngine:
         nxt = dict(zip(self._kv_names, outs[1:], strict=True))
         return logits[0, -1, :].astype(np.float32), nxt
 
+    def warm_thread(self) -> None:
+        """One minimal LM step on the calling thread: builds that thread's CUDA
+        provider context for the language model and the embedding session."""
+        emb = self._run("embed_tokens", {"input_ids": np.array([[SILENCE]], np.int64)})[0]
+        with self._lm_lock:
+            self._lm_step(
+                emb, np.ones((1, 1), np.int64), np.zeros((1, 1), np.int64), self._empty_kv()
+            )
+
     def prefix_cache(self, voice: VoiceTensors) -> PrefixKV:
         """Read the voice's conditioning prefix once; keep its KV cache resident."""
         n = int(voice.cond_emb.shape[1])
@@ -381,11 +401,13 @@ class ChatterboxEngine:
             return np.zeros(0, np.float32)
         left = max(0, min(int(left_context), len(toks)))
         right = max(0, min(int(right_context), len(toks) - left))
+        trailing = max(0, int(trailing_silence))
+        pad = bucket_padding(len(toks) + trailing, self.decode_buckets)
         seq = np.concatenate(
             [
                 voice.prompt_token,
                 np.array([toks], np.int64),
-                np.full((1, max(0, int(trailing_silence))), SILENCE, np.int64),
+                np.full((1, trailing + pad), SILENCE, np.int64),
             ],
             axis=1,
         )
@@ -402,10 +424,19 @@ class ChatterboxEngine:
         per = SAMPLES_PER_TOKEN
         start = max(0, left * per - max(0, int(context_tail))) if left else 0
         if keep_silence and not right:
-            end = len(wav)
+            end = len(wav) - pad * per  # the bucket padding is never audio
         else:
-            end = max(start, len(wav) - (int(trailing_silence) + right) * per)
+            end = max(start, len(wav) - (trailing + pad + right) * per)
         return wav[start:end]
+
+    def warm_decoder(self, voice: VoiceTensors) -> list[int]:
+        """Decode one sequence per bucket so serving never meets a new shape."""
+        done = []
+        for size in self.decode_buckets:
+            n = max(1, size - TRAILING_SILENCE_TOKENS)
+            self.decode_chunk([SILENCE] * n, voice, left_context=0)
+            done.append(size)
+        return done
 
     def synthesize(
         self,
@@ -422,17 +453,31 @@ class ChatterboxEngine:
         return self.decode_chunk(tokens, voice, left_context=0, keep_silence=True)
 
 
+TRAILING_SILENCE_TOKENS = 3  # what the pipeline appends (pipeline.TRAILING_SILENCE)
+
+
+def bucket_padding(length: int, buckets: Sequence[int]) -> int:
+    """How many SILENCE tokens pad a decoder sequence of ``length`` speech tokens
+    (context + emitted + lookahead + trailing silence) up to the next bucket.
+    Beyond the largest bucket nothing is padded."""
+    for b in buckets:
+        if length <= b:
+            return b - length
+    return 0
+
+
 def providers_for(provider: str, device_id: int, mem_limit_mb: int) -> list[Any]:
-    """The ONNX Runtime provider list. CUDA options (S5): arena grows only by what
-    is asked (the footprint after warm-up is the footprint), capped; heuristic
-    cuDNN algorithm search (exhaustive search re-tunes per new shape, and every
-    sentence is a new shape); copies on the default stream so IOBinding outputs
-    are ready when read."""
+    """The ONNX Runtime provider list. CUDA options (S5, S22): the arena extends in
+    power-of-two chunks, so the many distinct KV-cache and window sizes a
+    conversation produces reuse the same blocks (measured: a fixed footprint
+    after warm-up, where exact-size extension kept growing for 2.9 GB); capped;
+    heuristic cuDNN algorithm search (exhaustive search re-tunes per new shape);
+    copies on the default stream so IOBinding outputs are ready when read."""
     if provider == "cpu":
         return ["CPUExecutionProvider"]
     opts = {
         "device_id": str(int(device_id)),
-        "arena_extend_strategy": "kSameAsRequested",
+        "arena_extend_strategy": "kNextPowerOfTwo",
         "gpu_mem_limit": str(int(mem_limit_mb) * 1024 * 1024),
         "cudnn_conv_algo_search": "HEURISTIC",
         "do_copy_in_default_stream": "1",

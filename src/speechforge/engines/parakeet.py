@@ -128,7 +128,10 @@ class ParakeetStt:
         return self.engine.transcribe_words(audio)
 
     def warm_up(self) -> None:
+        # One short window and the longest rolling-partial window (realtime.max_tail_s
+        # is 8 s): the arena then holds its working set before the first session.
         self.engine.transcribe(np.zeros(16000, np.float32))
+        self.engine.transcribe(np.zeros(8 * 16000, np.float32))
 
     def describe(self) -> dict[str, Any]:
         return {

@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from speechforge import __version__
+from speechforge.engines.base import is_streaming_stt
 from speechforge.errors import SpeechError
 from speechforge.lanes import PRIO_EOU, PRIO_FINAL, PRIO_PARTIAL, SttLane
 from speechforge.metrics import METRICS, P_BUCKETS
@@ -171,8 +172,12 @@ class Session:
         if sp is not None:
             d = sp.describe
             shas = self.m.engine_shas()
+            # an adapter names its models.lock directory in describe()["lock_key"]
+            # (not a wire field); Parakeet predates the key
+            sttd = dict(d.get("stt", {}))
+            lock_key = sttd.pop("lock_key", "parakeet-tdt-0.6b-v2")
             engines = {
-                "stt": {**d.get("stt", {}), "sha8": shas.get("parakeet-tdt-0.6b-v2")},
+                "stt": {**sttd, "sha8": shas.get(lock_key)},
                 "tts": {
                     **d.get("tts", {}),
                     "sha8": shas.get("chatterbox-turbo"),
@@ -203,12 +208,18 @@ class Session:
         sp = self.m.residency.speaker
         vad_state = sp.vad.stream() if sp is not None and sp.vad is not None else None
         eou = self.stt_config.get("eou") or {}
+        if self.stt is not None:
+            self.stt.close_stream()
+        # a cache-aware streaming model gets one handle per session (fed at the
+        # partial cadence); Parakeet keeps the rolling re-decode
+        stream = sp.stt.create_stream() if sp is not None and is_streaming_stt(sp.stt) else None
         self.stt = RollingStt(
             partial_ms=int(self.stt_config.get("partial_ms", self.cfg.partial_ms)),
             min_pause_ms=int(eou.get("min_pause_ms", self.cfg.min_pause_ms)),
             max_tail_s=self.cfg.max_tail_s,
             max_utterance_s=self.cfg.max_utterance_s,
             vad=vad_state,
+            stream=stream,
         )
 
     # ------------------------------------------------------------ inbound
@@ -324,7 +335,8 @@ class Session:
         if self.stt is None:
             return
         async with self._final_lock:
-            job = self.stt.take_final(msg.get("id"))
+            stt = self.stt
+            job = stt.take_final(msg.get("id"))
             sp = self.m.residency.speaker
             if sp is None:
                 await self.error("not_ready", "models unloaded")
@@ -332,7 +344,7 @@ class Session:
             t0 = time.perf_counter()
 
             def run() -> tuple[str, list[tuple[str, float, float]]]:
-                return sp.transcribe_words(job.tail)
+                return stt.decode_final(job, sp)
 
             try:
                 text, words = await self.m.lane.submit(PRIO_FINAL, run)
@@ -341,7 +353,7 @@ class Session:
                 return
             ms = round((time.perf_counter() - t0) * 1000)
             METRICS.observe("stt_final_ms", ms)
-            await self.send(self.stt.apply_final(job, text, words, ms))
+            await self.send(stt.apply_final(job, text, words, ms))
 
     async def _partial(self) -> None:
         try:
@@ -352,14 +364,7 @@ class Session:
             t0 = time.perf_counter()
 
             def run() -> tuple[str, list[tuple[str, float, float]] | None, str]:
-                commit = None
-                if job.commit is not None and len(job.commit):
-                    commit = sp.transcribe_words(job.commit)
-                return (
-                    commit[0] if commit else "",
-                    commit[1] if commit else None,
-                    sp.transcribe(job.tail),
-                )
+                return stt.decode_partial(job, sp)
 
             ctext, cwords, tail = await self.m.lane.submit(PRIO_PARTIAL, run)
             if self.stt is not stt:
@@ -662,6 +667,8 @@ class SessionManager:
     def forget(self, s: Session) -> None:
         if self.sessions.pop(s.sid, None) is not None:
             s._stop_all_tts()
+            if s.stt is not None:
+                s.stt.close_stream()
             s.closed = True
             self.residency.session_closed()
         METRICS.set("sessions_open", len(self.live()))

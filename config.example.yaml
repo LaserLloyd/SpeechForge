@@ -35,10 +35,54 @@ tts:
   lookahead_tokens: 3
   prompt_s: 4.0
   max_http_streams: 1      # the HTTP utility route only
+  qwen3:                   # read only with engine: qwen3-tts (docs/ENGINES.md). Needs the
+    model: 1.7b            #   tts-torch extra and voices.allow_reference_clip: true (D3).
+    dtype: bf16            # or fp16
+    attn: sdpa             # flash_attention_2 only with a matching flash-attn wheel
+    language: English      # or Chinese, Japanese, ..., Auto
+    chunk_size: 8          # codec steps (12 per second) per streamed chunk
+    max_seq_len: 2048      # static KV cache: reference codes + text + generated steps
+    max_new_tokens: 1024   # ~85 s of audio
+    temperature: 0.9
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.05
+    xvec_only: false       # speaker embedding only: ignores transcripts, lower similarity
+    append_silence: true   # 0.5 s of silence after the reference clip
+  dots:                    # engine: dots-tts only (docs/ENGINES.md). Needs voices.allow_reference_clip (D3).
+    backend: native        # native = dots_tts PyTorch runtime in-process; http = SGLang Omni server (WSL2), loopback only
+    url: http://127.0.0.1:8000
+    http_model: ""         # model name in the request; "" = the pinned repo id
+    http_timeout_s: 30
+    precision: bf16
+    num_steps: 4           # MeanFlow checkpoint; null = artifact default (required for -2steps / -stts)
+    guidance_scale: 1.2    # no effect on dots.tts-mf (CFG fused); null for fixed-step artifacts
+    speaker_scale: 1.5
+    eos_threshold: 0.8
+    optimize: false        # torch.compile + warm-up at load (Triton); eager when off
+    warmup_on_optimize: true
+    max_generate_length: 500   # 160 ms patches (500 = 80 s)
+    output_rate: 24000     # the model speaks 48 kHz; 24000 decimates to the sf.1 frame rate
+    double_streaming: false    # incremental text on dots.tts-mf-2steps-stts (group tts-dots-stts)
+    language: null         # null, auto_detect, or a language code
+    normalize_text: false
+    allow_missing_text_normalizer: true   # shim WeTextProcessing (no Windows wheels)
 
 stt:
-  engine: parakeet
+  engine: parakeet         # or nemotron: NVIDIA Nemotron Speech Streaming EN 0.6B (docs/ENGINES.md;
+                           # weights under the NVIDIA Open Model License; needs the stt-nemotron extra)
   max_audio_s: 30          # the HTTP utility routes only
+  nemotron:
+    backend: auto          # auto = subprocess on Windows + cuda (sherpa-onnx's CUDA 12 ORT DLLs
+                           # clash with the CUDA 13 onnxruntime-gpu in-process), else sherpa-onnx
+    chunk_ms: 160          # fixed at export; the pinned export is the 160 ms one
+    quantization: null     # null = fp32 export; int8 = the quantised export (CPU)
+    num_threads: 2         # CPU provider only
+    decoding: greedy_search
+    tail_pad_ms: 480       # silence fed before the final so the last chunk flushes
+    python: ""             # subprocess backend: interpreter of the venv holding the sherpa-onnx
+                           # CUDA wheel (empty = this interpreter)
+    worker_timeout_s: 120
 
 eou:
   enabled: true            # Smart Turn v3.2 GPU at every >= min_pause_ms pause

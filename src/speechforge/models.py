@@ -12,8 +12,11 @@ file), verified download, and verification at load (SPEC-speechforge §7.1).
   A stamp older than ``models.full_verify_days`` (7) triggers a full re-hash.
   No stamp at all = full hash once (the first load after a manual copy).
 
-Groups name what a configuration needs: ``tts-<dtype>``, ``stt-fp32`` or
-``stt-int8``, ``eou-gpu``/``eou-cpu`` (Smart Turn), ``vad`` (Silero).
+Groups name what a configuration needs: ``tts-<dtype>`` (Chatterbox),
+``tts-qwen3`` / ``tts-qwen3-0.6b`` (Qwen3-TTS, phase 2), ``tts-dots`` /
+``tts-dots-stts`` (dots.tts, phase 2), ``stt-fp32`` or ``stt-int8`` (Parakeet),
+``stt-nemotron`` or ``stt-nemotron-int8`` (Nemotron streaming, ``stt.engine:
+nemotron``), ``eou-gpu``/``eou-cpu`` (Smart Turn), ``vad`` (Silero).
 """
 
 from __future__ import annotations
@@ -40,12 +43,35 @@ def load_lock() -> dict[str, Any]:
     return json.loads(text)
 
 
+def tts_groups(config: Any) -> list[str]:
+    """The model group(s) the configured TTS engine loads from disk."""
+    tts = config.tts
+    if tts.engine == "qwen3-tts":
+        size = tts.qwen3.model
+        return ["tts-qwen3" if size == "1.7b" else f"tts-qwen3-{size}"]
+    if tts.engine == "dots-tts":
+        dots = tts.dots
+        if dots.backend == "http":
+            return []  # the weights live with the server, not in models_dir
+        return ["tts-dots-stts" if dots.double_streaming else "tts-dots"]
+    return [f"tts-{config.models.tts_dtype}"]
+
+
+def tts_group_for(config: Any) -> str:
+    """The first TTS group (callers that expect exactly one)."""
+    groups = tts_groups(config)
+    return groups[0] if groups else ""
+
+
+def stt_group(config: Any) -> str:
+    if config.stt.engine == "nemotron":
+        q = config.stt.nemotron.quantization
+        return "stt-nemotron-int8" if q == "int8" else "stt-nemotron"
+    return "stt-int8" if config.models.stt_quantization == "int8" else "stt-fp32"
+
+
 def groups_for(config: Any) -> list[str]:
-    g = [
-        f"tts-{config.models.tts_dtype}",
-        "stt-int8" if config.models.stt_quantization == "int8" else "stt-fp32",
-        "vad",
-    ]
+    g = [*tts_groups(config), stt_group(config), "vad"]
     if config.eou.enabled:
         g.append("eou-gpu" if config.gpu.provider == "cuda" else "eou-cpu")
     return g

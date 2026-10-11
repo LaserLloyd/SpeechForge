@@ -86,6 +86,9 @@ FORBIDDEN_PATHS = [
     # every suffixed one through. `.env.example` is the shipped template.
     (re.compile(r"(^|/)\.env(?:$|\.(?!example$))"),
      "a real environment file"),
+    # SpeechForge keeps its secrets in `<data>/speechforge.env` (DECISIONS S8):
+    # any `<name>.env` is a real environment file too, not just the bare one.
+    (re.compile(r"(^|/)[^/]+\.env$"),       "a real environment file (SPEECHFORGE_TOKEN lives in one)"),
     (re.compile(r"(^|/)(media|files|backups|logs)/"), "a runtime data directory"),
     (re.compile(r"\.bak(-|$)"),                "a stray backup file"),
 ]
@@ -104,6 +107,12 @@ FORBIDDEN_IF_COMMITTED = [
      "a voice recording from a real install"),
     (re.compile(r"\.(npz|npy|onnx|onnx_data|onnx\.data|safetensors)$", re.I),
      "model weights or voice conditionals"),
+    # The listening-test kit (docs/LISTENING-TEST.md): the raters' answers name
+    # the family, the key names the engines behind the blind labels.
+    (re.compile(r"(^|/)ratings/[^/]+\.jsonl$"),
+     "a listening-test rating file (a rater's nickname and comments)"),
+    (re.compile(r"(^|/)key\.json$"),
+     "a listening-test key"),
 ]
 
 #: The `why` of the tailnet-address rule. Named because HEURISTIC_IN_FIXTURES
@@ -635,6 +644,35 @@ def selftest() -> int:
         _git(root, "rm", "-q", "-f", "src/speechforge/assets/selftest-voice.wav",
              "voices/owner.wav", "voices/owner.npz")
 
+
+        # --- committed-only rules: data a working install writes ------------
+        # Voice conditionals, recordings, ratings, keys and env files may exist
+        # in a checkout (the data dir can live inside it) but never travel.
+        # Positive and negative per rule, like the content fixtures below.
+        carried_bad = {
+            "voices/0a1b.npz": "a voice conditional",
+            "renders/chatterbox/01.wav": "an audio recording",
+            "set/ratings/sam.jsonl": "a listening-test rating file",
+            "key/key.json": "a listening-test key",
+            "data/speechforge.env": "a real environment file",
+        }
+        carried_ok = ["src/speechforge/assets/selftest-voice.wav", "set/manifest.json",
+                      "launchers/local-env.example.bat"]
+        for rel in list(carried_bad) + carried_ok:
+            f = root / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"RIFF" if rel.endswith(".wav") else b"{}\n")
+            _git(root, "add", "-f", rel)
+        found = scan(root, staged=True)
+        for rel, why in carried_bad.items():
+            if not any(p.startswith(rel + ":") and why in p for p in found):
+                failures.append(f"committed-only rule missed {rel!r} ({why})")
+        for rel in carried_ok:
+            if any(p.startswith(rel + ":") for p in found):
+                failures.append(f"FALSE POSITIVE: {rel!r} may ship and was flagged")
+        for rel in list(carried_bad) + carried_ok:
+            _git(root, "rm", "-q", "-f", "--cached", rel)
+            (root / rel).unlink()
 
         # --- rev mode: the commit, not the checkout --------------------------
         # Same hole as --staged, one step out: a pre-push hook that reads the

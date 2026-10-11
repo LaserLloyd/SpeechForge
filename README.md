@@ -35,10 +35,14 @@ voice storage, OpenAI-compatible one-shot routes): [`docs/API.md`](docs/API.md).
 
 ## Install and operate (Windows host)
 
-One elevated run of [`install.ps1`](install.ps1) (driver/OS checks, uv, `releases\<tag>` +
-`current` layout, locked environment, hash-verified models, token shown once, firewall rule
-scoped to the box, mini dumps, at-logon launcher, `doctor`). Updates are blue/green with a
-canary self-test and automatic rollback. Details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+One elevated run of [`install.ps1`](install.ps1) installs the newest `v*` release tag straight
+from this repository (`-Source <git URL | bundle | clone path>` for a fork or an offline bundle;
+`-Tag` to pin one): driver/OS checks, uv, `releases\<tag>` + `current` layout, locked
+environment, hash-verified models, token shown once, firewall rule scoped to the box
+(`-BoxAddress`; the whole tailnet range when omitted), mini dumps, at-logon launcher, `doctor`.
+Re-running it is safe. Updates are blue/green from the same source with a canary self-test and
+automatic rollback. A plain checkout with `SPEECHFORGE_DATA_DIR` set works too (the developer
+layout). Details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 | Command | What |
 | --- | --- |
@@ -47,7 +51,7 @@ canary self-test and automatic rollback. Details: [`docs/RUNBOOK.md`](docs/RUNBO
 | `speechforge fetch-models` / `verify-models` | download / re-check every file against `models.lock` |
 | `speechforge token new\|rotate\|fingerprint` | 256-bit bearer token; rotation keeps the old one 5 minutes |
 | `speechforge bench --url ws://host:1236/v1/realtime` | the phase-1 acceptance gates, PASS/FAIL |
-| `speechforge update --check\|--apply\|--rollback --bundle F` | blue/green release switch |
+| `speechforge update --check\|--apply\|--rollback [--source URL\|PATH] [--tag T]` | blue/green release switch from a git remote or a bundle |
 
 Requirements: Windows 11, NVIDIA driver R580+, Python 3.12 via uv,
 `onnxruntime-gpu[cuda,cudnn] >=1.28,<1.32` (CUDA 13 + cuDNN 9 as pip wheels; no CUDA toolkit).

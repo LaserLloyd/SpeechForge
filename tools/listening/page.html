@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Listening test</title>
+<style>
+:root{--bg:#f6f4ef;--fg:#1f1d1a;--muted:#6b665e;--card:#fff;--line:#d9d4ca;--acc:#3d6ea8;--acc2:#2d8a5e;--warn:#b0452b}
+@media (prefers-color-scheme:dark){:root{--bg:#17181b;--fg:#e9e6df;--muted:#9a958b;--card:#222428;--line:#3a3d44;--acc:#7fb0e8;--acc2:#5fc08c;--warn:#e07a5f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:.2em 0}
+p.muted,small{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0}
+.line-text{font-size:1.15rem;margin:.3em 0 1em}
+.sample{display:grid;grid-template-columns:auto 1fr;gap:10px 14px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:10px;margin:8px 0}
+.sample.selected{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 30%,transparent)}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:8px 14px}
+button.play{min-width:110px;font-weight:600}
+button.play.playing{border-color:var(--acc2);color:var(--acc2)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.mos{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.mos label{display:inline-flex;align-items:center;justify-content:center;width:38px;height:34px;border:1px solid var(--line);border-radius:8px;cursor:pointer;user-select:none}
+.mos input{display:none}
+.mos input:checked+span{background:var(--acc);color:#fff;border-radius:7px;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+.likes{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+.likes label{padding:8px 14px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.likes input{display:none}
+.likes input:checked+span{color:var(--acc2);font-weight:700}
+textarea,input[type=text]{font:inherit;width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-top:12px}
+.err{color:var(--warn)}
+.progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:8px 0}
+.progress div{height:100%;background:var(--acc)}
+kbd{font:.85em ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Listening test</h1>
+<p class="muted">Two to four voices read the same line. Rate how natural each one sounds, then pick the one that
+sounds most like <b id="ownerName"></b>. There is no right answer. Headphones help.</p>
+
+<section id="start" class="card">
+  <label for="nick">Your nickname (so you can stop and come back)</label>
+  <input id="nick" type="text" maxlength="32" autocomplete="off" placeholder="e.g. sam">
+  <div class="row"><small>Letters, digits, - and _ only. Nothing else about you is recorded.</small>
+  <button class="primary" id="startBtn">Start</button></div>
+  <p class="err" id="startErr"></p>
+</section>
+
+<section id="test" class="hidden">
+  <div class="progress"><div id="bar" style="width:0%"></div></div>
+  <p class="muted" id="counter"></p>
+  <div class="card">
+    <p class="line-text" id="lineText"></p>
+    <div id="samples"></div>
+    <p><b>Which one sounds most like <span class="ownerName"></span>?</b></p>
+    <div class="likes" id="likes"></div>
+    <textarea id="comment" rows="2" placeholder="Optional: anything you noticed (a word that was wrong, a click, too fast...)"></textarea>
+    <div class="row">
+      <small>Keys: <kbd>1</kbd>-<kbd>4</kbd> play &amp; select, <kbd>space</kbd> replay, <kbd>q</kbd> <kbd>w</kbd> <kbd>e</kbd> <kbd>r</kbd> <kbd>t</kbd> = 1-5, <kbd>m</kbd> most like, <kbd>Enter</kbd> next</small>
+      <button class="primary" id="nextBtn" disabled>Next</button>
+    </div>
+    <p class="err" id="err"></p>
+  </div>
+</section>
+
+<section id="done" class="card hidden">
+  <h2>All done, thank you.</h2>
+  <p class="muted">Your answers are saved on this computer only. You can close the page.</p>
+</section>
+</main>
+<script>
+(function(){
+"use strict";
+const OWNER = __OWNER__;
+const $ = id => document.getElementById(id);
+document.querySelectorAll('.ownerName').forEach(e => e.textContent = OWNER);
+$('ownerName').textContent = OWNER;
+
+let manifest = null, nick = null, queue = [], idx = 0, cur = null;
+let players = {}, selected = null, mos = {}, mostLike = null, order = [], t0 = 0, playing = null;
+
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+async function getJSON(url, opts){ const r = await fetch(url, Object.assign({cache:'no-store'}, opts||{})); const j = await r.json(); if(!r.ok) throw new Error(j.error||('HTTP '+r.status)); return j; }
+
+$('startBtn').onclick = start;
+$('nick').addEventListener('keydown', e => { if(e.key==='Enter') start(); });
+try { const saved = localStorage.getItem('lt-nick'); if(saved) $('nick').value = saved; } catch(e){}
+
+async function start(){
+  const n = $('nick').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,32}$/.test(n)){ $('startErr').textContent = 'Nickname: 1-32 letters, digits, - or _'; return; }
+  try {
+    manifest = await getJSON('/api/manifest');
+    const prog = await getJSON('/api/progress?rater='+encodeURIComponent(n));
+    nick = n; try{ localStorage.setItem('lt-nick', n); }catch(e){}
+    const done = new Set(prog.done);
+    queue = manifest.lines.filter(l => !done.has(l.id));
+    idx = 0;
+    $('start').classList.add('hidden');
+    if(!queue.length){ finish(); return; }
+    $('test').classList.remove('hidden');
+    show();
+  } catch(err){ $('startErr').textContent = String(err.message||err); }
+}
+
+function stopAll(){ for(const k in players){ try{ players[k].pause(); players[k].currentTime = 0; }catch(e){} } playing = null; document.querySelectorAll('button.play').forEach(b => b.classList.remove('playing')); }
+
+function show(){
+  cur = queue[idx]; mos = {}; mostLike = null; selected = null; players = {}; t0 = Date.now();
+  const total = manifest.lines.length, doneCount = total - queue.length + idx;
+  $('bar').style.width = Math.round(100*doneCount/total) + '%';
+  $('counter').textContent = 'Line ' + (doneCount+1) + ' of ' + total;
+  $('lineText').textContent = '“' + cur.text + '”';
+  $('comment').value = ''; $('err').textContent = '';
+  order = shuffle(Object.keys(cur.samples).sort());
+  const box = $('samples'); box.innerHTML = '';
+  order.forEach((label, i) => {
+    const s = cur.samples[label];
+    const a = new Audio('/audio/' + s.file); a.preload = 'auto'; players[label] = a;
+    a.addEventListener('ended', () => { playing = null; row.querySelector('button.play').classList.remove('playing'); });
+    const row = document.createElement('div'); row.className = 'sample'; row.dataset.label = label;
+    const btn = document.createElement('button'); btn.className = 'play'; btn.textContent = '▶ Play ' + (i+1);
+    btn.title = 'key ' + (i+1); btn.onclick = () => play(label);
+    const m = document.createElement('div'); m.className = 'mos';
+    const cap = document.createElement('span'); cap.className = 'muted'; cap.textContent = 'Natural? 1 = robotic, 5 = a person'; m.appendChild(cap);
+    for(let v=1; v<=5; v++){
+      const l = document.createElement('label'); const r = document.createElement('input');
+      r.type = 'radio'; r.name = 'mos-' + label; r.value = v;
+      r.onchange = () => { mos[label] = v; select(label); update(); };
+      const sp = document.createElement('span'); sp.textContent = v; l.appendChild(r); l.appendChild(sp); m.appendChild(l);
+    }
+    row.appendChild(btn); row.appendChild(m); box.appendChild(row);
+  });
+  const likes = $('likes'); likes.innerHTML = '';
+  order.forEach((label, i) => {
+    const l = document.createElement('label'); const r = document.createElement('input');
+    r.type = 'radio'; r.name = 'like'; r.value = label; r.onchange = () => { mostLike = label; update(); };
+    const sp = document.createElement('span'); sp.textContent = 'Voice ' + (i+1); l.appendChild(r); l.appendChild(sp); likes.appendChild(l);
+  });
+  update();
+}
+
+function select(label){ selected = label; document.querySelectorAll('.sample').forEach(r => r.classList.toggle('selected', r.dataset.label === label)); }
+function play(label){
+  stopAll(); select(label);
+  const a = players[label]; if(!a) return;
+  const row = document.querySelector('.sample[data-label="'+label+'"]');
+  a.currentTime = 0; a.play().then(() => { playing = label; row.querySelector('button.play').classList.add('playing'); }).catch(() => {});
+}
+function setMos(v){ if(!selected) return; const r = document.querySelector('input[name="mos-'+selected+'"][value="'+v+'"]'); if(r){ r.checked = true; mos[selected] = v; update(); } }
+function setLike(){ if(!selected) return; const r = document.querySelector('input[name="like"][value="'+selected+'"]'); if(r){ r.checked = true; mostLike = selected; update(); } }
+function complete(){ return cur && order.every(l => mos[l]) && !!mostLike; }
+function update(){ $('nextBtn').disabled = !complete(); }
+
+async function submit(){
+  if(!complete()) return;
+  $('nextBtn').disabled = true;
+  const body = { rater: nick, line: cur.id, mos: mos, most_like: mostLike, order: order,
+                 comment: $('comment').value.trim(), spent_ms: Date.now() - t0 };
+  try {
+    await getJSON('/api/rate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    stopAll(); idx += 1;
+    if(idx >= queue.length) finish(); else show();
+  } catch(err){ $('err').textContent = 'Could not save: ' + (err.message||err); $('nextBtn').disabled = false; }
+}
+$('nextBtn').onclick = submit;
+function finish(){ stopAll(); $('test').classList.add('hidden'); $('done').classList.remove('hidden'); }
+
+document.addEventListener('keydown', e => {
+  if($('test').classList.contains('hidden')) return;
+  if(e.target && e.target.tagName === 'TEXTAREA'){ if(e.key === 'Enter' && (e.ctrlKey||e.metaKey)) { e.preventDefault(); submit(); } return; }
+  const k = e.key;
+  if(k >= '1' && k <= '4'){ const l = order[parseInt(k,10)-1]; if(l){ e.preventDefault(); play(l); } return; }
+  if(k === ' '){ e.preventDefault(); if(selected) play(selected); return; }
+  const m = {q:1, w:2, e:3, r:4, t:5}[k.toLowerCase()];
+  if(m){ e.preventDefault(); setMos(m); return; }
+  if(k.toLowerCase() === 'm'){ e.preventDefault(); setLike(); return; }
+  if(k === 'Enter'){ e.preventDefault(); submit(); }
+});
+})();
+</script>
+</body>
+</html>

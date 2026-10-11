@@ -52,6 +52,29 @@ cpu = [
     "tokenizers>=0.20",
     "huggingface-hub>=0.26",
 ]
+# Phase-2 TTS bake-off: Qwen3-TTS through faster-qwen3-tts (PyTorch CUDA graphs).
+# torch/torchaudio come from PyTorch's cu130 index (the PyPI Windows wheels are
+# CPU-only), pinned as a matched pair: torchaudio is an import-time dependency
+# of the qwen_tts package and its compiled extension must match torch. The pair
+# is the newest with cu130 win_amd64 wheels for both (docs/ENGINES.md). Needs
+# `voices.allow_reference_clip: true` (D3) and is installed ON TOP of `gpu`:
+#     uv sync --extra gpu --extra tts-torch
+tts-torch = [
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "faster-qwen3-tts>=0.5.4,<0.6",
+    "soundfile>=0.13",
+]
+# NVIDIA Nemotron Speech Streaming through sherpa-onnx (`stt.engine: nemotron`,
+# docs/ENGINES.md). PyPI carries the CPU wheel only (it bundles its own ONNX
+# Runtime). The CUDA wheel comes from k2-fsa's index as a local version
+# (`sherpa-onnx==1.13.8+cuda12.cudnn9`, Windows x64 / Linux) and on Windows must
+# live in a SEPARATE venv used by `stt.nemotron.backend: subprocess`: its CUDA 12
+# ONNX Runtime DLLs share names with the CUDA 13 `gpu` extra's. >= 1.13.0 is the
+# first release after the 160 ms exports this project pins (2026-04-25).
+stt-nemotron = [
+    "sherpa-onnx>=1.13.0,<1.14",
+]
 dev = [
     "pytest>=8.3,<10",
     "pytest-asyncio>=1.0,<2",
@@ -74,11 +97,35 @@ packages = ["src/speechforge"]
 # installed on the Windows rig (`uv sync --extra gpu` fails before ONNX Runtime is
 # even reached). Hold the resolver to a release with a win_amd64 wheel.
 constraint-dependencies = ["nvidia-cublas!=13.8.1.7"]
+# qwen-tts-hf (pulled by faster-qwen3-tts) requires the CPU `onnxruntime` wheel,
+# which unpacks into the same `onnxruntime/` package directory as `onnxruntime-gpu`
+# from the `gpu` extra: whichever installs last wins and the CUDA provider can
+# vanish. `import onnxruntime` is satisfied by onnxruntime-gpu. Overrides are
+# global, so every requirement on onnxruntime (qwen-tts-hf's and our own `cpu`
+# extra's) becomes "the CPU wheel, only with the `cpu` extra": `--extra cpu` still
+# gets it, `--extra gpu --extra tts-torch` never does. gradio is only used by the
+# package's demo and would otherwise pin fastapi/starlette for the whole server.
+override-dependencies = [
+    "onnxruntime>=1.28,<1.32; extra == 'cpu'",
+    "gradio; sys_platform == 'never'",
+]
+
+# PyTorch's CUDA 13.0 wheels. `explicit`: used only by the packages that name it
+# below, and only when the `tts-torch` extra is selected; the default install and
+# the `gpu` extra never see this index.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", extra = "tts-torch" }]
+torchaudio = [{ index = "pytorch-cu130", extra = "tts-torch" }]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET"]
