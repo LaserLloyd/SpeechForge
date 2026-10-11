@@ -88,16 +88,25 @@ class SmartTurn:
     name = "smart-turn-v3.2"
 
     def __init__(
-        self, path: Path, *, provider: str = "cuda", device_id: int = 0, mem_limit_mb: int = 1024
+        self,
+        path: Path,
+        *,
+        provider: str = "cuda",
+        device_id: int = 0,
+        mem_limit_mb: int = 1024,
+        shared_arena: bool = False,
     ) -> None:
         import onnxruntime as ort
 
+        from speechforge.engines import arena
         from speechforge.engines.chatterbox import providers_for
 
         so = ort.SessionOptions()
         so.log_severity_level = 3
         if provider == "cpu":
             so.intra_op_num_threads = 1
+        self.shared_arena = bool(shared_arena) and provider == "cuda"
+        arena.configure_session_options(so, self.shared_arena)
         self._sess = ort.InferenceSession(
             str(path), so, providers=providers_for(provider, device_id, mem_limit_mb)
         )

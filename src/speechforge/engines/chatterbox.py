@@ -153,9 +153,12 @@ class ChatterboxEngine:
         repetition_penalty: float = 1.2,
         cpu_threads: int = 4,
         use_iobinding: bool | None = None,
+        shared_arena: bool = False,
     ) -> None:
         import onnxruntime as ort
         from tokenizers import Tokenizer
+
+        from speechforge.engines import arena
 
         if dtype not in DTYPES:
             raise ValueError(f"dtype must be one of {DTYPES}")
@@ -173,6 +176,7 @@ class ChatterboxEngine:
         self.repetition_penalty = repetition_penalty
         self._device_type = "cuda" if provider == "cuda" else "cpu"
         self._iobinding = (provider == "cuda") if use_iobinding is None else bool(use_iobinding)
+        self.shared_arena = bool(shared_arena) and provider == "cuda"
         self._s: dict[str, Any] = {}
         for c in COMPONENTS:
             so = ort.SessionOptions()
@@ -180,6 +184,7 @@ class ChatterboxEngine:
             so.log_severity_level = 3
             if provider == "cpu":
                 so.intra_op_num_threads = max(1, int(cpu_threads))
+            arena.configure_session_options(so, self.shared_arena)
             sess = ort.InferenceSession(
                 str(self.model_dir / "onnx" / filename(c, dtype)),
                 so,
@@ -472,7 +477,11 @@ def providers_for(provider: str, device_id: int, mem_limit_mb: int) -> list[Any]
     conversation produces reuse the same blocks (measured: a fixed footprint
     after warm-up, where exact-size extension kept growing for 2.9 GB); capped;
     heuristic cuDNN algorithm search (exhaustive search re-tunes per new shape);
-    copies on the default stream so IOBinding outputs are ready when read."""
+    copies on the default stream so IOBinding outputs are ready when read.
+
+    With the shared arena (S24, ``engines/arena.py``) a session's own arena is
+    replaced by the environment's; the options stay as the floor for a session
+    that does not pick it up."""
     if provider == "cpu":
         return ["CPUExecutionProvider"]
     opts = {

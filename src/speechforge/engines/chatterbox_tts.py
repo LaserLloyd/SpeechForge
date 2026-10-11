@@ -146,6 +146,8 @@ class ChatterboxTts:
 
 
 def load(config: Any, device_id: int) -> ChatterboxTts:
+    from speechforge.engines import arena
+
     t = config.tts
     eng = ChatterboxEngine(
         config.models_dir / "chatterbox-turbo",
@@ -157,6 +159,7 @@ def load(config: Any, device_id: int) -> ChatterboxTts:
         top_k=t.top_k,
         top_p=t.top_p,
         repetition_penalty=t.repetition_penalty,
+        shared_arena=arena.in_use(device_id),
     )
     plan = ChunkPlanConfig(
         t.first_chunk_tokens, t.chunk_tokens, t.left_context, t.lookahead_tokens, t.prompt_s
