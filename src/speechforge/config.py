@@ -81,6 +81,13 @@ class GpuConfig(_Section):
     mem_limit_mb: int = Field(6144, ge=512)
     #: NVIDIA driver floor (R580 = the CUDA 13 runtime the ORT wheels use).
     min_driver: int = Field(580, ge=0)
+    #: One ONNX Runtime arena for every CUDA session on the card, created once at
+    #: load with a large first chunk (S24, ``engines/arena.py``); off = one arena
+    #: per session (S22). A registration the runtime refuses falls back to off.
+    shared_arena: bool = True
+    #: The shared arena's first chunk. The runtime's field is a 32-bit int, so
+    #: 2047 MiB is the most it accepts (the bound, and the default).
+    arena_initial_mb: int = Field(2047, ge=64, le=2047)
 
 
 class ModelsConfig(_Section):
