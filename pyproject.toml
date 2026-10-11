@@ -69,6 +69,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/speechforge"]
 
+[tool.uv]
+# nvidia-cublas 13.8.1.7 shipped Linux wheels only; a lock that picks it cannot be
+# installed on the Windows rig (`uv sync --extra gpu` fails before ONNX Runtime is
+# even reached). Hold the resolver to a release with a win_amd64 wheel.
+constraint-dependencies = ["nvidia-cublas!=13.8.1.7"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
