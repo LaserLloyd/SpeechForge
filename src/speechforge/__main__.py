@@ -2,6 +2,8 @@
 
 speechforge serve [--port N --host IP --no-lease]   run the server (foreground)
 speechforge supervise                               the restart loop (the launcher runs this)
+speechforge tray                                    system-tray controller: adopts a running
+                                                    server or launches the supervisor (S23)
 speechforge fetch-models [--group tts-fp16 ...]     download what models.lock lists, verified
 speechforge verify-models [--full]                  re-check sizes/stamps (or every sha256)
 speechforge doctor                                  driver, CUDA, ORT, cards, models, bind, token,
@@ -121,6 +123,18 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         else root_from_here()
     )
     return supervise(config.server.port, config.state_dir, extra_args=extra, root=root)
+
+
+def cmd_tray(args: argparse.Namespace) -> int:
+    """The system-tray controller (S23). Needs the ``tray`` extra; it says so."""
+    from speechforge.tray import main as tray_main
+
+    try:
+        config = _load(args)
+    except ConfigError as exc:
+        print(f"[FAIL] config            {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    return tray_main(config, args.config)
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
@@ -498,6 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="")
     p.add_argument("--no-lease", action="store_true")
     add("supervise", cmd_supervise, "run the server under the restart loop")
+    add("tray", cmd_tray, "system-tray controller (adopts a running server or launches supervise)")
     p = add("fetch-models", cmd_fetch, "download the models in models.lock")
     p.add_argument(
         "--group", action="append", help="lock group(s), e.g. tts-fp16 (default: what config needs)"
