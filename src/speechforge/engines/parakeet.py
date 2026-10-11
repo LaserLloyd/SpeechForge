@@ -41,9 +41,12 @@ class ParakeetEngine:
         device_id: int = 0,
         mem_limit_mb: int = 6144,
         cpu_threads: int = 4,
+        shared_arena: bool = False,
     ) -> None:
         import onnx_asr
         import onnxruntime as ort
+
+        from speechforge.engines import arena
 
         self.model_dir = Path(model_dir)
         missing = [f for f in model_files(quantization) if not (self.model_dir / f).exists()]
@@ -56,6 +59,9 @@ class ParakeetEngine:
         so.log_severity_level = 3
         if provider == "cpu":
             so.intra_op_num_threads = max(1, int(cpu_threads))
+        self.shared_arena = bool(shared_arena) and provider == "cuda"
+        # onnx-asr builds every session (preprocessor, encoder, decoder) from these.
+        arena.configure_session_options(so, self.shared_arena)
         self._model: Any = onnx_asr.load_model(
             MODEL_NAME,
             str(self.model_dir),
@@ -128,7 +134,10 @@ class ParakeetStt:
         return self.engine.transcribe_words(audio)
 
     def warm_up(self) -> None:
+        # One short window and the longest rolling-partial window (realtime.max_tail_s
+        # is 8 s): the arena then holds its working set before the first session.
         self.engine.transcribe(np.zeros(16000, np.float32))
+        self.engine.transcribe(np.zeros(8 * 16000, np.float32))
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -142,6 +151,8 @@ class ParakeetStt:
 
 
 def load(config: Any, device_id: int) -> ParakeetStt:
+    from speechforge.engines import arena
+
     q = config.models.stt_quantization
     eng = ParakeetEngine(
         config.models_dir / "parakeet-tdt-0.6b-v2",
@@ -149,5 +160,6 @@ def load(config: Any, device_id: int) -> ParakeetStt:
         provider=config.gpu.provider,
         device_id=device_id,
         mem_limit_mb=config.gpu.mem_limit_mb,
+        shared_arena=arena.in_use(device_id),
     )
     return ParakeetStt(eng, quantization=q)

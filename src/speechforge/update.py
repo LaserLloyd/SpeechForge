@@ -6,10 +6,13 @@ Layout (``install.ps1`` creates it)::
     <root>\\current            junction (Windows) / symlink -> releases\\<tag>
     <root>\\data\\              shared: config, env file, models (by lock hash), logs, state
 
-``speechforge update --check --bundle FILE`` lists the bundle's tags against the
-running one. ``--apply`` then:
+``speechforge update --check [--source URL|PATH]`` lists the source's release
+tags (``v*``, newest last) against the running one. The source is a git URL or
+a local bundle/clone; it defaults to the ``origin`` of the running release and
+then to the public repository. ``--apply`` then:
 
-1. clones the tag into ``releases\\<tag>`` (never ``git pull`` in place);
+1. clones the tag into ``releases\\<tag>`` (``git clone --branch <tag> --depth 1``,
+   after checking the tag exists at the source; never ``git pull`` in place);
 2. ``uv sync --locked --extra gpu`` there; fetches any model file its lock adds
    (shared files are verified by hash, not re-downloaded);
 3. starts it as a **canary** on loopback ``:1237`` with leases off (the live
@@ -30,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,11 +44,19 @@ from typing import Any
 
 CANARY_PORT = 1237
 POST_SWITCH_S = 120.0
+DEFAULT_SOURCE = "https://github.com/LaserLloyd/SpeechForge.git"
+_URL_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|[\w.-]+@[\w.-]+:)", re.IGNORECASE)
+_TAG_RE = re.compile(r"^v(\d+(?:\.\d+)*)(.*)$")
+
+
+def release_from_here() -> Path:
+    """The checkout this code runs from (``<root>/releases/<tag>`` or a plain clone)."""
+    return Path(__file__).resolve().parents[2]
 
 
 def root_from_here() -> Path | None:
     """``<root>`` when this code runs from ``<root>/releases/<tag>``."""
-    rel = Path(__file__).resolve().parents[2]
+    rel = release_from_here()
     if rel.parent.name == "releases":
         return rel.parent.parent
     return None
@@ -62,10 +74,62 @@ def run(argv: list[str], cwd: Path | None = None, timeout: float = 1800) -> str:
     return out.stdout
 
 
-def bundle_tags(bundle: Path) -> list[str]:
-    text = run(["git", "ls-remote", "--tags", str(bundle)])
-    tags = [ln.split("refs/tags/", 1)[1] for ln in text.splitlines() if "refs/tags/" in ln]
-    return sorted({t.removesuffix("^{}") for t in tags})
+def is_url(source: str) -> bool:
+    """A git URL (``https://``, ``ssh://``, ``git://``, ``user@host:path``) as opposed
+    to a local bundle file or clone directory."""
+    return bool(_URL_RE.match(source.strip()))
+
+
+def version_key(tag: str) -> tuple[int, ...]:
+    """Sort key for ``v<major>.<minor>.<patch>[-pre]`` tags: numeric, a pre-release
+    suffix sorts before the final release of the same number."""
+    m = _TAG_RE.match(tag)
+    if not m:
+        return ()
+    nums = [int(x) for x in m.group(1).split(".")]
+    while len(nums) < 3:
+        nums.append(0)
+    return (*nums, 0 if m.group(2) else 1)
+
+
+def release_tags(lines: str) -> list[str]:
+    """The ``v*`` tags in ``git ls-remote --tags`` output, oldest first (version
+    order, not text order: v0.10.0 is newer than v0.9.0)."""
+    found: set[str] = set()
+    for ln in lines.splitlines():
+        if "refs/tags/" not in ln:
+            continue
+        tag = ln.split("refs/tags/", 1)[1].strip().removesuffix("^{}")
+        if _TAG_RE.match(tag):
+            found.add(tag)
+    return sorted(found, key=version_key)
+
+
+def source_tags(source: str) -> list[str]:
+    """Release tags at ``source`` (a git URL, or a bundle/clone path): one
+    ``git ls-remote --tags``, nothing fetched."""
+    return release_tags(run(["git", "ls-remote", "--tags", source], timeout=120))
+
+
+def default_source(release: Path | None = None) -> str:
+    """Where updates come from when ``--source`` is not given: the ``origin`` of
+    the running release when it has one that still exists (a URL, or a local
+    bundle/clone that is still there), else the public repository."""
+    rel = release or release_from_here()
+    try:
+        url = run(["git", "-C", str(rel), "remote", "get-url", "origin"], timeout=30).strip()
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return DEFAULT_SOURCE
+    if not url:
+        return DEFAULT_SOURCE
+    if is_url(url) or Path(url).exists():
+        return url
+    return DEFAULT_SOURCE
+
+
+def clone_argv(source: str, tag: str, target: Path) -> list[str]:
+    """One release = one shallow clone of one tag. Never ``git pull`` (S17)."""
+    return ["git", "clone", "--quiet", "--branch", tag, "--depth", "1", source, str(target)]
 
 
 def current_target(root: Path) -> Path | None:
@@ -121,7 +185,7 @@ async def gate(url: str, token: str, voice: bytes) -> dict[str, Any]:
 
 def apply(
     root: Path,
-    bundle: Path,
+    source: str,
     tag: str | None,
     *,
     token: str,
@@ -129,9 +193,12 @@ def apply(
     live_port: int,
     data_dir: Path,
 ) -> int:
-    tags = bundle_tags(bundle)
+    tags = source_tags(source)
     if not tags:
-        print("the bundle has no tags")
+        print(f"no release tags (v*) at {source}")
+        return 1
+    if tag and tag not in tags:
+        print(f"tag {tag} is not at {source} (have: {', '.join(tags)})")
         return 1
     tag = tag or tags[-1]
     target = root / "releases" / tag
@@ -141,8 +208,8 @@ def apply(
         return 0
     if target.exists():
         shutil.rmtree(target)
-    print(f"[1/6] cloning {tag}")
-    run(["git", "clone", "--quiet", "--branch", tag, str(bundle), str(target)])
+    print(f"[1/6] cloning {tag} from {source}")
+    run(clone_argv(source, tag, target))
     print("[2/6] uv sync --locked --extra gpu")
     run(["uv", "sync", "--locked", "--extra", "gpu", "--extra", "dev"], cwd=target)
     py = str(venv_python(target))

@@ -205,6 +205,11 @@ class Residency:
     def gpu_facts(self) -> dict[str, Any]:
         return dict(self._facts)
 
+    def shared_arena(self) -> bool:
+        """Whether the loaded sessions share one arena (S24); false until a
+        speaker is loaded with one."""
+        return bool(self.speaker is not None and getattr(self.speaker, "shared_arena", False))
+
     def gpu_live(self) -> dict[str, Any]:
         return self._live_fn(self.device) if self.device is not None else {}
 
@@ -369,7 +374,9 @@ class Residency:
             "state": self.state,
             "ready": self.state == "ready",
             "device": self.device,
-            "gpu": self.gpu_facts(),
+            # The sf.1 ready frame carries gpu_facts() alone; the shared-arena flag
+            # is for /ready and the harness.
+            "gpu": {**self.gpu_facts(), "shared_arena": self.shared_arena()},
             "sessions": self._sessions,
             "inflight": self._inflight,
             "idle_s": round(now - self._last_used, 1),

@@ -248,3 +248,160 @@ leases off, same card) over sf.1, drains, switches, restarts, and switches back 
 server does not reach `ready` within 2 minutes. The supervisor starts the child from
 `current\.venv`, stops restarting after 5 crashes in 10 minutes and then answers `/health` with
 `crashloop` itself. Supersedes S9's bundle pull.
+
+**Source (added when the repository went public).** A release is a `v*` tag, newest by version
+order. `install.ps1 -Source` and `update --source` take a git URL (default: the public
+repository, else the running release's `origin`) or a local bundle/clone path -- the bundle
+stays as the offline route, nothing else changes between the two: the tag is checked with
+`git ls-remote --tags`, then cloned shallow at that tag. A plain checkout with
+`SPEECHFORGE_DATA_DIR` set (the developer layout) is supported beside the releases layout;
+`doctor` names the layout it sees and does not look for a junction in a checkout.
+
+## S18 -- Long-lived worker threads and one decoder shape
+
+**Decision.** `pipelined()` runs the language-model producer and the decoder on
+long-lived thread pools that outlive the sentence; warm-up runs one LM step on every
+LM worker and one decode per bucket on the decoder's thread; and every decoder input
+pads to a single shape (`DECODE_BUCKETS = (40, 64)`, SILENCE tokens whose audio is
+dropped).
+
+**Why (measured on the host, 2026-10-11; `docs/BENCHMARKS.md`).** ONNX Runtime's CUDA
+provider builds a per-thread context (cuBLAS/cuDNN handles) the first time a thread
+runs a session: 300-450 ms. A thread per sentence paid that on every first chunk, so
+TTFA was bimodal (the same 18-token decode took 50 ms or 450 ms). A new decoder input
+shape costs 150-700 ms the first time, and switching between two *known* shapes still
+costs ~200 ms per switch, while the decode itself costs ~55 ms whether the input holds
+8 or 40 tokens. Together these took the in-process first audio from p50 662 / p90 691 ms
+to p50 221 / p90 233 ms (fp16, first chunk 10) and the RTF from 0.67 to 0.30.
+
+**Cost.** Up to 32 padding tokens are decoded and discarded per chunk (no measurable
+time, since the decoder's cost is flat in this range). The pools are module-level and
+sized for `realtime.max_sessions x max_contexts` plus warm-up.
+
+## S19 -- fp16 Chatterbox on the host; the repo default stays fp32 for now
+
+**Decision.** The host's config sets `models.tts_dtype: fp16` and
+`tts.first_chunk_tokens: 10`. The repository default remains fp32 (S4) until the
+speaker-similarity check of SPEC §11.3 has run with the owner's voice.
+
+**Why.** The LM step is 11-13 ms per token at fp16 and 28-30 ms at fp32 on the same
+card (the fp32 path also pays ~4 ms of IOBinding overhead per step); the RTX 5090 is no
+faster than the 3090 at fp32, so this is launch-bound work and only the smaller graph
+helps. The self-test's WER gates hold at fp16 (golden STT 2.9 %, round trip 0 %) and the
+harness round trip reads 2.5 %. What has not been measured is timbre: S4 asked for a
+golden-audio and similarity check before fp16 becomes the default, and that needs the
+owner's clip (tools/listening, `similarity.py`).
+
+## S20 -- The harness measures from the wire, not the nominal clock
+
+**Decision.** `RigClient.send_mic(realtime=True)` paces frames against a deadline
+schedule and returns the wall time at which the frame carrying a given sample left;
+`bench` measures end-of-turn latency from that moment.
+
+**Why.** `asyncio.sleep(0.02)` lasts ~31 ms on Windows' 15.6 ms timer, so the "real-time"
+stream ran at two thirds of real time and the first EOU measurement read 6.9 s while the
+server's `eou` arrived 125 ms after the last speech frame. The gate now reads 171 ms.
+
+## S21 -- Chunks are sized to the measured token rate
+
+**Decision.** After the first chunk, `pipelined()` sizes the next chunk so that generating
+its missing tokens at the median step time measured so far, plus one decode, finishes
+`margin_ms` (100) before the audio already emitted runs out; clamped to
+`[min_chunk (6), chunk_tokens (25)]`. `ChunkPlanConfig.adaptive` turns it off.
+
+**Why.** The 30-minute two-session soak counted one underrun per sentence per session: the
+10-token first chunk is 400 ms of audio and the fixed second chunk (25 + 3 lookahead tokens)
+takes ~780 ms when two sessions interleave on the LM at 26 ms/token (S12). A fixed schedule
+is right for exactly one token rate; the real rate depends on how many contexts share the
+card. With one session (13 ms/token) the schedule still reaches 25-token chunks.
+
+## S22 -- A fixed footprint: power-of-two arenas and warm-up to the working set
+
+**Decision.** `arena_extend_strategy: kNextPowerOfTwo` for every CUDA session; warm-up also
+synthesises one long line and transcribes one 8 s window (`realtime.max_tail_s`).
+
+**Why (measured, 2026-10-11).** With `kSameAsRequested` the TTS arenas grew 2.9 GB over the
+first 30 sentences after load and the STT arena 374 MiB over its first 120 varied windows,
+then both plateaued: a plateau, not a leak, but it showed up as "VRAM drift" while serving
+(336 MiB over the soak; 1.6 GB since load) and it is the neighbours' free memory that
+StudioForge plans with (S5). With power-of-two extension the same runs grew 54 MiB (TTS) and
+14 MiB (STT) and the total card use was 7.1 GB instead of 8.5 GB, at the same speed. The two
+extra warm-up items make the first long sentence and the longest partial window pay their
+allocations at load rather than in a conversation.
+
+## S23 -- Owner decisions after the first host build (2026-10-11)
+
+* **D3: reference clips may be stored on the host for the phase-2 bake-off.** The host's
+  config sets `voices.allow_reference_clip: true`; the clip lives in the user-only voices
+  folder (never indexed, never backed up, deleted with the profile) and never leaves the
+  machine. The repository default stays `false`.
+* **Nemotron Speech Streaming is approved for private use only** (NVIDIA Open Model License):
+  it stays off by default and is never recommended in public documents.
+* **fp16 Chatterbox stays a host setting** until the speaker-similarity check of SPEC §11.3
+  has run with the owner's voice (S19).
+* **Residency on the host:** `warm_on_boot: true` and `idle_unload_s: 3600`, so the cold load
+  is paid at logon and a quiet hour keeps the card; a tier-1 (chat model) lease still vacates
+  it within the drain budget (StudioForge D56).
+* **Trial order for phase 2:** Qwen3-TTS, then dots.tts, then Nemotron; each measured with
+  its GPU smoke script before any wider wiring.
+* **The long-term voice (D2) is decided by the family listening test**, not by latency alone.
+
+## S25 -- A tray, like the other Forges
+
+**Decision.** `speechforge tray` (extra `tray`: pystray + Pillow, imported lazily) puts an "SF"
+icon with a status dot in the notification area beside the other Forges' trays. It is a
+controller, not a second supervisor: it **adopts** a server whose `/health` already answers,
+else launches `speechforge supervise` as a window-less child with the same data dir; it polls
+`/health` (2 s, no auth) and `/ready` (5 s, token from the env file, never shown or logged);
+restart and stop are file requests the supervisor honours (`state/restart.request`, new
+`state/stop.request` -- a console signal cannot reach a child that has no console), and the
+stop applies only to a supervisor the tray launched. `install.ps1` points the Startup entry at
+`SpeechForge Tray.bat`; `Start SpeechForge.bat` (console) is unchanged.
+
+**Why.** The host already shows ClawChat, ClawForge and StudioForge as icons; a console
+window for the fourth service was the odd one out, and "is it ready, is anything connected,
+did the lease go" should be a glance, not a `curl`. Adopt-or-launch keeps one supervisor per
+port whichever launcher started it.
+
+## S24 -- One arena for every session (measured: off by default)
+
+**Decision.** With `gpu.shared_arena: true` (the default) and the CUDA provider, `load_speaker`
+registers one ONNX Runtime arena for the card before the first session is created --
+`create_and_register_allocator_v2("CUDAExecutionProvider", OrtMemoryInfo("Cuda", ARENA, device,
+DEFAULT), {device_id}, OrtArenaCfg{...})` -- and every session (Chatterbox's four, Parakeet's
+through onnx-asr's `sess_options`, Smart Turn) sets `session.use_env_allocators = 1`. The arena's
+first chunk is `gpu.arena_initial_mb` (default and ceiling 2047 MiB), it extends power-of-two (S22)
+and is capped at twice `gpu.mem_limit_mb`. Registration is once per device per process; a refusal
+logs one warning and the load continues with per-session arenas, which every session also keeps
+in its provider options as the floor. `/ready` reports `gpu.shared_arena`.
+
+**Why.** The cold load is 33.7 s against a 10 s target (`docs/BENCHMARKS.md`, "Open"): ~9 s of
+session creation and ~20 s of warm-up that is believed to be six arenas each growing to their
+working set. One arena with a large first chunk makes that ramp one allocation at load and lets
+the sessions share free blocks instead of each holding its own high-water mark.
+
+**What the runtime allows (checked against onnxruntime-gpu 1.31.0).** The plain
+`create_and_register_allocator(OrtMemoryInfo, OrtArenaCfg)` refuses CUDA memory ("Only CPU devices
+are supported. Please call CreateAndRegisterAllocatorV2() for other device"), so the CUDA path is
+the v2 call with the provider name and a provider-options mapping. `OrtArenaCfg.initial_chunk_size_bytes`
+is a 32-bit int: 2047 MiB is the largest first chunk the wheel accepts (2048 and 4096 MiB fail at
+construction), hence the bound. There is no Python call to unregister an environment allocator.
+
+**To be measured (`scripts/gpu_cold_load.py`, both `--shared` and `--no-shared`, fp16, the serving
+card).** Cold load: session creation and warm-up time separately, against 9 s + 20 s. Footprint:
+NVML used after warm-up (7.2 GB today) and whether it stays fixed over a soak. First audio: TTFA
+p50/p90 and RTF through `speechforge bench` must be unchanged (190 / 226 ms, 0.23). Unload:
+whether the card's used memory returns to its baseline after `close()` -- an environment arena
+outlives the sessions, so if it keeps its chunks the default must become `false` for a tenant
+that gives the card back (S3), or the unload must shrink it. The decision stands as "on by default"
+only if the load gets faster and the footprint and TTFA hold.
+
+**Measured 2026-10-11 (RTX 5090, fp16, `scripts/gpu_cold_load.py`, two runs each).** Shared arena:
+sessions 12.4 / 12.9 s, warm-up 32.8 / 15.3 s, footprint after warm-up 6.7 GB, **after close 6.3 GB
+(5.5 GB held)**. Per-session arenas: sessions 14.7 / 11.7 s, warm-up 35.9 / 21.1 s, footprint
+7.9 GB, after close 1.4 GB. The shared arena saves ~15 % of warm-up and 1.2 GB while serving, but
+ONNX Runtime cannot unregister an environment allocator, so the memory stays on the card after the
+models unload -- which is exactly when a lease-returning tenant (S3) must give the card back.
+**Default `gpu.shared_arena: false`**; the code stays behind the flag for a deployment that never
+unloads (or that exits the process to unload). The cold-load answer remains the Open list in
+docs/BENCHMARKS.md.

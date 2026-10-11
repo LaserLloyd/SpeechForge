@@ -170,9 +170,18 @@ def test_verify_detects_changes_and_rehashes_stale_stamps(tmp_path, monkeypatch)
     path.write_bytes(data)
     assert models.verify(cfg, ["vad"])["silero-vad/silero_vad.onnx"] == "rehashed"  # no stamp
     assert models.verify(cfg, ["vad"])["silero-vad/silero_vad.onnx"] == "ok"
-    cfg.models.full_verify_days = 1e-9
+    # Age the stamp instead of shrinking the window to nanoseconds: on Windows
+    # two time.time() calls can be closer than any positive window.
+    stamp = tmp_path / "state" / "model-stamps" / "silero-vad__silero_vad.onnx.json"
+    aged = json.loads(stamp.read_text())
+    aged["at"] -= 10 * 86400
+    stamp.write_text(json.dumps(aged))
     assert models.verify(cfg, ["vad"])["silero-vad/silero_vad.onnx"] == "rehashed"
     path.write_bytes(b"abd" * 1000)  # same size, different bytes, new mtime
+    # The fast path trusts size + mtime_ns; a rewrite inside one filesystem
+    # timestamp tick would look unchanged, so move the mtime on explicitly.
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     with pytest.raises(models.ModelError):
         models.verify(cfg, ["vad"])
 
@@ -318,6 +327,133 @@ def test_switch_and_prune(tmp_path):
     assert update.rollback(tmp_path, tmp_path / "data") == 0
     assert update.current_target(tmp_path) == a.resolve()
     assert (tmp_path / "data" / "state" / "restart.request").exists()
+
+
+LS_REMOTE = """\
+1111111111111111111111111111111111111111\trefs/tags/v0.2.0
+2222222222222222222222222222222222222222\trefs/tags/v0.2.0^{}
+3333333333333333333333333333333333333333\trefs/tags/v0.10.0
+4444444444444444444444444444444444444444\trefs/tags/v0.10.0^{}
+5555555555555555555555555555555555555555\trefs/tags/v0.9.1
+6666666666666666666666666666666666666666\trefs/tags/v0.10.0-rc1
+7777777777777777777777777777777777777777\trefs/tags/nightly
+8888888888888888888888888888888888888888\trefs/tags/release-2
+"""
+
+
+class _FakeRun:
+    """Stands in for subprocess.run: records argv, answers from a table keyed on
+    the subcommand, and can refuse like a failed git call."""
+
+    def __init__(self, answers: dict[str, str | Exception]):
+        self.answers = answers
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kw):
+        import subprocess
+
+        self.calls.append(list(argv))
+        key = argv[1] if argv[1] != "-C" else argv[3]
+        ans = self.answers.get(key, "")
+        if isinstance(ans, Exception):
+            raise ans
+        return subprocess.CompletedProcess(argv, 0, stdout=ans, stderr="")
+
+
+def test_release_tags_are_v_only_and_version_sorted():
+    from speechforge import update
+
+    tags = update.release_tags(LS_REMOTE)
+    assert tags == ["v0.2.0", "v0.9.1", "v0.10.0-rc1", "v0.10.0"]
+    assert tags[-1] == "v0.10.0"  # text order would have picked v0.9.1
+    assert update.version_key("v1") == update.version_key("v1.0.0")
+    assert update.version_key("v1.2.3-rc1") < update.version_key("v1.2.3")
+    assert update.version_key("nightly") == ()
+
+
+def test_source_tags_runs_one_ls_remote(monkeypatch):
+    from speechforge import update
+
+    fake = _FakeRun({"ls-remote": LS_REMOTE})
+    monkeypatch.setattr(update.subprocess, "run", fake)
+    assert update.source_tags("https://example.com/x.git")[-1] == "v0.10.0"
+    assert fake.calls == [["git", "ls-remote", "--tags", "https://example.com/x.git"]]
+
+
+def test_is_url():
+    from speechforge.update import is_url
+
+    assert is_url("https://github.com/LaserLloyd/SpeechForge.git")
+    assert is_url("ssh://git@example.com/x.git")
+    assert is_url("git@example.com:x/y.git")
+    assert not is_url(r"C:\releases\speechforge.bundle")
+    assert not is_url("/srv/speechforge.bundle")
+    assert not is_url("speechforge.bundle")
+
+
+def test_default_source_prefers_a_live_origin(monkeypatch, tmp_path):
+    from speechforge import update
+
+    # A URL origin wins.
+    fake = _FakeRun({"remote": "https://example.com/fork.git\n"})
+    monkeypatch.setattr(update.subprocess, "run", fake)
+    assert update.default_source(tmp_path) == "https://example.com/fork.git"
+    assert fake.calls[0][:4] == ["git", "-C", str(tmp_path), "remote"]
+    # A bundle origin that is still there wins; one that is gone falls back.
+    bundle = tmp_path / "speechforge.bundle"
+    bundle.write_bytes(b"")
+    monkeypatch.setattr(update.subprocess, "run", _FakeRun({"remote": f"{bundle}\n"}))
+    assert update.default_source(tmp_path) == str(bundle)
+    gone = tmp_path / "gone.bundle"
+    monkeypatch.setattr(update.subprocess, "run", _FakeRun({"remote": f"{gone}\n"}))
+    assert update.default_source(tmp_path) == update.DEFAULT_SOURCE
+    # No origin at all (a plain checkout without a remote) falls back too.
+    import subprocess
+
+    err = subprocess.CalledProcessError(2, ["git"])
+    monkeypatch.setattr(update.subprocess, "run", _FakeRun({"remote": err}))
+    assert update.default_source(tmp_path) == update.DEFAULT_SOURCE
+
+
+def test_clone_argv_is_one_shallow_tag_clone(tmp_path):
+    from speechforge.update import clone_argv
+
+    argv = clone_argv("https://example.com/x.git", "v0.3.0", tmp_path / "releases" / "v0.3.0")
+    assert argv[:2] == ["git", "clone"]
+    assert "--branch" in argv and argv[argv.index("--branch") + 1] == "v0.3.0"
+    assert argv[argv.index("--depth") + 1] == "1"
+    assert argv[-2:] == ["https://example.com/x.git", str(tmp_path / "releases" / "v0.3.0")]
+    assert "pull" not in argv
+
+
+def test_apply_refuses_before_cloning(monkeypatch, tmp_path):
+    """An unknown tag, or a source without release tags, stops before anything
+    is cloned, synced or started."""
+    from speechforge import update
+
+    fake = _FakeRun({"ls-remote": LS_REMOTE})
+    monkeypatch.setattr(update.subprocess, "run", fake)
+    kw = {"token": "t", "voice": b"", "live_port": 1, "data_dir": tmp_path / "data"}
+    assert update.apply(tmp_path, "https://example.com/x.git", "v9.9.9", **kw) == 1
+    assert [c[1] for c in fake.calls] == ["ls-remote"]
+    fake = _FakeRun({"ls-remote": "abc\trefs/tags/nightly\n"})
+    monkeypatch.setattr(update.subprocess, "run", fake)
+    assert update.apply(tmp_path, "https://example.com/x.git", None, **kw) == 1
+    assert [c[1] for c in fake.calls] == ["ls-remote"]
+    assert not (tmp_path / "releases").exists()
+
+
+def test_update_cli_accepts_source_and_the_old_bundle_name():
+    from speechforge.__main__ import build_parser
+
+    ap = build_parser()
+    assert ap.parse_args(["update", "--check", "--source", "https://x/y.git"]).source == (
+        "https://x/y.git"
+    )
+    assert ap.parse_args(["update", "--apply", "--bundle", "f.bundle", "--tag", "v1"]).source == (
+        "f.bundle"
+    )
+    assert ap.parse_args(["update", "--rollback"]).source == ""
 
 
 # --------------------------------------------------------------------- bench / self-test

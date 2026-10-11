@@ -178,8 +178,11 @@ async def stream_clip(client: Any, audio16k: np.ndarray, tail_silence_s: float =
     speech_end = start_pts + len(audio16k)
     pcm = to16(np.concatenate([audio16k, np.zeros(int(tail_silence_s * 16000), np.float32)]))
     t0 = time.perf_counter()
-    await client.send_mic(pcm, realtime=True)
-    t_speech_end = t0 + len(audio16k) / 16000
+    # The moment the last speech frame actually left, not the nominal clock:
+    # a paced sender that falls behind would otherwise inflate every eou figure.
+    t_speech_end = await client.send_mic(pcm, realtime=True, mark_pts=speech_end)
+    if t_speech_end is None:
+        t_speech_end = t0 + len(audio16k) / 16000
     await client.send({"type": "stt.flush", "id": "b"})
     final = await client.next("stt.final", timeout=10)
     partials = client.drain("stt.partial")

@@ -42,6 +42,15 @@ CONFIG_FILE_NAME = "config.yaml"
 #: transcripts (the per-file hashes are in models.lock).
 CHATTERBOX_REVISION = "d21799bd0354adb85e348b8a0442a8405110a2cf"
 PARAKEET_REVISION = "0bbb45a3365852604aef28b538a8f066f4ccaa85"
+#: Qwen3-TTS-12Hz-*-Base per ``tts.qwen3.model`` (phase-2 bake-off, docs/ENGINES.md).
+QWEN3_TTS_REVISIONS = {
+    "1.7b": "fd4b254389122332181a7c3db7f27e918eec64e3",
+    "0.6b": "5d83992436eae1d760afd27aff78a71d676296fc",
+}
+#: sherpa-onnx exports of nvidia/nemotron-speech-streaming-en-0.6b at a fixed
+#: 160 ms chunk (the chunk size is baked in at export): fp32 and int8 repos.
+NEMOTRON_REVISION = "9660703a1289d5b5c0c6470ced80eb52096fc740"
+NEMOTRON_INT8_REVISION = "237e551abd7a411ef92d3595454d9f6ab5fe7d6c"
 
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
@@ -72,6 +81,13 @@ class GpuConfig(_Section):
     mem_limit_mb: int = Field(6144, ge=512)
     #: NVIDIA driver floor (R580 = the CUDA 13 runtime the ORT wheels use).
     min_driver: int = Field(580, ge=0)
+    #: One ONNX Runtime arena for every CUDA session on the card, created once at
+    #: load with a large first chunk (S24, ``engines/arena.py``); off = one arena
+    #: per session (S22). A registration the runtime refuses falls back to off.
+    shared_arena: bool = False
+    #: The shared arena's first chunk. The runtime's field is a 32-bit int, so
+    #: 2047 MiB is the most it accepts (the bound, and the default).
+    arena_initial_mb: int = Field(2047, ge=64, le=2047)
 
 
 class ModelsConfig(_Section):
@@ -82,8 +98,100 @@ class ModelsConfig(_Section):
     full_verify_days: float = Field(7.0, gt=0)
 
 
+class Qwen3TtsConfig(_Section):
+    """``tts.qwen3``: read only when ``tts.engine`` is ``qwen3-tts`` (docs/ENGINES.md).
+    The engine needs ``voices.allow_reference_clip: true`` (decision D3)."""
+
+    model: Literal["1.7b", "0.6b"] = "1.7b"
+    dtype: Literal["bf16", "fp16"] = "bf16"
+    attn: Literal["sdpa", "flash_attention_2"] = "sdpa"
+    #: Passed to the model per utterance ("English", "Chinese", ..., or "Auto").
+    language: str = "English"
+    #: Codec steps (12 per second of audio) per streamed chunk; smaller = earlier first audio.
+    chunk_size: int = Field(8, ge=1, le=48)
+    #: Static KV cache length: reference codes + text + generated steps.
+    max_seq_len: int = Field(2048, ge=256, le=8192)
+    max_new_tokens: int = Field(1024, ge=12, le=4096)
+    temperature: float = Field(0.9, ge=0.0, le=2.0)
+    top_k: int = Field(50, ge=1)
+    top_p: float = Field(1.0, gt=0.0, le=1.0)
+    repetition_penalty: float = Field(1.05, ge=1.0, le=3.0)
+    #: Speaker embedding only (ignores every transcript): no phoneme bleed, less similarity.
+    xvec_only: bool = False
+    #: Half a second of silence after the reference so its last phoneme ends there.
+    append_silence: bool = True
+
+
+class DotsTtsConfig(_Section):
+    """``tts.dots``: the dots.tts-mf adapter (``engines/dots_tts.py``, phase-2 bake-off).
+
+    The engine clones from a reference clip + transcript that must be on the rig,
+    so it loads only with ``voices.allow_reference_clip: true`` (decision D3).
+    """
+
+    #: ``native`` runs the ``dots_tts`` PyTorch runtime in this process on the
+    #: leased card; ``http`` talks to an SGLang Omni ``/v1/audio/speech`` server
+    #: (Linux / WSL2 on this machine) over loopback only.
+    backend: Literal["native", "http"] = "native"
+    url: str = "http://127.0.0.1:8000"
+    http_model: str = ""
+    http_timeout_s: float = Field(30.0, gt=0, le=300)
+    precision: Literal["bf16", "fp16", "fp32"] = "bf16"
+    #: MeanFlow checkpoint: 4 recommended; ``null`` = the artifact's own default
+    #: (required for the fixed-step ``-2steps`` / ``-stts`` artifacts).
+    num_steps: int | None = Field(4, ge=1, le=64)
+    guidance_scale: float | None = Field(1.2, ge=0.0, le=10.0)
+    speaker_scale: float = Field(1.5, ge=0.0, le=5.0)
+    eos_threshold: float = Field(0.8, gt=0.0, le=2.0)
+    #: torch.compile (Triton) with a warm-up at load; off = eager.
+    optimize: bool = False
+    warmup_on_optimize: bool = True
+    #: Longest utterance in 160 ms latent patches (500 = 80 s).
+    max_generate_length: int = Field(500, ge=16, le=2000)
+    #: The model speaks at 48 kHz; 24000 decimates to the sf.1 frame rate.
+    output_rate: Literal[24000, 48000] = 24000
+    #: Incremental text in, audio out, on the ``dots.tts-mf-2steps-stts`` artifact
+    #: (model group ``tts-dots-stts``); native backend only.
+    double_streaming: bool = False
+    #: Language hint for the runtime (``null`` = none, ``auto_detect``, or a code).
+    language: str | None = None
+    normalize_text: bool = False
+    #: WeTextProcessing (pynini) has no Windows wheels; with this on, a missing
+    #: ``tn`` package is shimmed so the runtime imports. Text normalisation is
+    #: then unavailable (``normalize_text`` must stay false).
+    allow_missing_text_normalizer: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _loopback_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(value.strip())
+        if parts.scheme != "http" or not parts.hostname:
+            raise ValueError("tts.dots.url must be an http:// URL")
+        if not is_loopback_host(parts.hostname):
+            raise ValueError(
+                "tts.dots.url must be loopback: the reference clip leaves this process "
+                "only to a server on this machine (D3, SPEC 8.4)"
+            )
+        return value.strip().rstrip("/")
+
+    @field_validator("language")
+    @classmethod
+    def _language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text or text.lower() == "none":
+            return None
+        if len(text) > 32:
+            raise ValueError("tts.dots.language is too long")
+        return text
+
+
 class TtsConfig(_Section):
     engine: str = "chatterbox"
+    qwen3: Qwen3TtsConfig = Field(default_factory=Qwen3TtsConfig)
     first_chunk_tokens: int = Field(15, ge=4, le=100)
     chunk_tokens: int = Field(25, ge=4, le=200)
     left_context: int = Field(8, ge=0, le=50)
@@ -95,12 +203,43 @@ class TtsConfig(_Section):
     repetition_penalty: float = Field(1.2, ge=1.0, le=3.0)
     #: HTTP utility route only: concurrent /v1/audio/speech calls.
     max_http_streams: int = Field(1, ge=1, le=8)
+    #: Knobs of the ``dots-tts`` engine (docs/ENGINES.md); ignored by the others.
+    dots: DotsTtsConfig = Field(default_factory=DotsTtsConfig)
+
+
+class NemotronConfig(_Section):
+    """``stt.engine: nemotron`` -- NVIDIA Nemotron Speech Streaming EN 0.6B through
+    sherpa-onnx (docs/ENGINES.md). Weights: NVIDIA Open Model License."""
+
+    #: ``auto`` = ``subprocess`` on Windows with the CUDA provider (sherpa-onnx's
+    #: GPU wheel bundles its own ONNX Runtime + CUDA 12 DLLs, which clash by name
+    #: with this process's CUDA 13 onnxruntime-gpu), ``sherpa-onnx`` in-process
+    #: everywhere else.
+    backend: Literal["auto", "sherpa-onnx", "subprocess"] = "auto"
+    #: The export's chunk (its ``encoder.onnx`` carries it): the model decodes a
+    #: new chunk of text every 160 ms of audio. Other exports exist (80/560/1120 ms,
+    #: same publisher); adding one is a models.lock group plus this Literal.
+    chunk_ms: Literal[160] = 160
+    #: ``int8`` = the dynamically quantised export (CPU; S4 explains why not CUDA).
+    quantization: Literal["int8"] | None = None
+    #: sherpa-onnx intra-op threads (CPU provider; the CUDA provider ignores it).
+    num_threads: int = Field(2, ge=1, le=32)
+    decoding: Literal["greedy_search", "modified_beam_search"] = "greedy_search"
+    #: Silence fed before ``finalize`` so the encoder's right context and the
+    #: last chunk flush (sherpa-onnx's own example pads 660 ms).
+    tail_pad_ms: int = Field(480, ge=0, le=2000)
+    #: ``subprocess`` backend: the interpreter that has sherpa-onnx (its CUDA
+    #: wheel lives in its own venv); empty = this process's interpreter.
+    python: str = ""
+    #: ``subprocess`` backend: how long a load / a stream call may take.
+    worker_timeout_s: float = Field(120.0, ge=5.0, le=900.0)
 
 
 class SttConfig(_Section):
     engine: str = "parakeet"
     #: HTTP utility route only.
     max_audio_s: float = Field(30.0, gt=0, le=120)
+    nemotron: NemotronConfig = Field(default_factory=NemotronConfig)
 
 
 class EouConfig(_Section):

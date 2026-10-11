@@ -20,6 +20,12 @@ from speechforge.engines.chatterbox import ChatterboxEngine, slice_prompt
 from speechforge.pipeline import ChunkPlanConfig, pipelined
 from speechforge.voices import VoiceTensors, parse_npz
 
+WARMUP_LONG_LINE = (
+    "Before anyone arrives, let me run through the whole plan once more, from the first "
+    "stop at the station to the last ferry back, so that nothing on the list is a surprise "
+    "when we get there this afternoon."
+)
+
 
 class ChatterboxTts:
     name = "chatterbox"
@@ -103,6 +109,22 @@ class ChatterboxTts:
 
         voice = parse_npz(self.build_voice(synthetic_reference(), TTS_SAMPLE_RATE))
         list(self.stream("Warming up the voice.", "_warmup", voice, seed=0))
+        # A long line too, so the LM's KV cache reaches a long sentence's size at
+        # load (S22): the footprint after warm-up is then the serving footprint.
+        list(self.stream(WARMUP_LONG_LINE, "_warmup", voice, seed=0))
+        # Every decoder bucket once (a new shape costs 150-700 ms on CUDA), on
+        # the decoder's own long-lived thread, so the first real chunk pays
+        # neither the shape set-up nor the per-thread CUDA context.
+        warm = getattr(self.engine, "warm_decoder", None)
+        if callable(warm):
+            from speechforge.pipeline import decode_pool
+
+            decode_pool().submit(warm, slice_prompt(voice, self.plan.prompt_s)).result()
+        warm_thread = getattr(self.engine, "warm_thread", None)
+        if callable(warm_thread):
+            from speechforge.pipeline import warm_lm_workers
+
+            warm_lm_workers(warm_thread)
         with self._lock:
             self._prepared.pop("_warmup", None)
 
@@ -124,6 +146,8 @@ class ChatterboxTts:
 
 
 def load(config: Any, device_id: int) -> ChatterboxTts:
+    from speechforge.engines import arena
+
     t = config.tts
     eng = ChatterboxEngine(
         config.models_dir / "chatterbox-turbo",
@@ -135,6 +159,7 @@ def load(config: Any, device_id: int) -> ChatterboxTts:
         top_k=t.top_k,
         top_p=t.top_p,
         repetition_penalty=t.repetition_penalty,
+        shared_arena=arena.in_use(device_id),
     )
     plan = ChunkPlanConfig(
         t.first_chunk_tokens, t.chunk_tokens, t.left_context, t.lookahead_tokens, t.prompt_s

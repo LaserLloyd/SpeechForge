@@ -1,8 +1,10 @@
 """Rolling streaming STT on the rig, per session (SPEC-speechforge §5.1, §5.2).
 
 Mic audio (16 kHz PCM16, 20 ms frames, ``pts`` on the session's mic clock)
-arrives continuously. This object is pure bookkeeping -- no model calls; the
-session runs the jobs it hands out on the STT lane:
+arrives continuously. This object is bookkeeping; the session runs the jobs it
+hands out on the STT lane (:meth:`RollingStt.decode_partial` and
+:meth:`RollingStt.decode_final` are the job bodies, the only places that
+touch a model):
 
 * **VAD** (Silero, CPU, 512-sample windows) marks speech and pauses; the box's
   own Silero stays authoritative, the rig's is informational (``stt.vad``) and
@@ -17,6 +19,16 @@ session runs the jobs it hands out on the STT lane:
 * **Final** (``stt.flush``): decode the tail with word timings, join the
   committed segments, report ``upto`` (mic clock) and start a new utterance
   from there. Audio that arrived after ``upto`` stays for the next one.
+
+**Streaming adapters.** With a :class:`~speechforge.engines.base.StreamingSttAdapter`
+(``stream`` is its per-session handle) a partial *feeds* only the audio that
+arrived since the last one and takes the model's running text; nothing is
+re-decoded and nothing is committed (the model keeps its own context). The
+final feeds the rest, finalizes, and resets the handle for the next
+utterance, which starts at ``upto``. Word timings come from the handle,
+relative to the utterance start; a streaming model without timings falls
+back to one ``transcribe_words`` pass over the buffered utterance when the
+adapter has it. Parakeet's rolling path is untouched (``stream is None``).
 
 All times on the wire are in the mic sample clock (16 kHz) except ``lag_ms``.
 """
@@ -61,20 +73,22 @@ class Word:
 
 @dataclass
 class PartialJob:
-    tail: np.ndarray
-    tail_start: int
+    tail: np.ndarray  # streaming: only the audio not yet fed
+    tail_start: int  # streaming: the utterance (= stream) start
     upto: int
     commit: np.ndarray | None = None
     commit_start: int = 0
     commit_end: int = 0
+    streaming: bool = False
 
 
 @dataclass
 class FinalJob:
-    tail: np.ndarray
-    tail_start: int
+    tail: np.ndarray  # streaming: only the audio not yet fed
+    tail_start: int  # streaming: the utterance (= stream) start
     upto: int
     fid: Any = None
+    streaming: bool = False
 
 
 @dataclass
@@ -92,6 +106,8 @@ class RollingStt:
     max_utterance_s: float = 60.0
     vad: Any = None  # a per-session VAD state: callable(window float32) -> prob
     clock: Any = time.monotonic
+    #: An ``SttStreamHandle`` when the STT adapter streams; None = rolling re-decode.
+    stream: Any = None
 
     def __post_init__(self) -> None:
         self.reset_all()
@@ -118,12 +134,33 @@ class RollingStt:
         self._prev_tail_words: list[str] = []
         self._last_partial_text: str | None = None
         self.dropped_samples = 0
+        self._fed = 0  # streaming: mic index up to which the handle has been fed
+        self._stream_reset()
+
+    @property
+    def streaming(self) -> bool:
+        return self.stream is not None
+
+    def _stream_reset(self) -> None:
+        if self.stream is not None:
+            self.stream.reset()
+
+    def close_stream(self) -> None:
+        """The session is gone: free the handle (a subprocess backend holds
+        state per stream)."""
+        if self.stream is not None:
+            fn = getattr(self.stream, "close", None)
+            if callable(fn):
+                fn()
+            self.stream = None
 
     def reset_utterance(self) -> None:
         """``stt.reset``: drop the open utterance; keep the clock."""
         end = self._buf_start + self._buf_len
         self._trim_to(end)
         self.utt_start = self.tail_start = end
+        self._fed = end
+        self._stream_reset()
         self.committed = []
         self.had_speech = self.speech
         self.speech_end = None if self.speech else end
@@ -166,7 +203,7 @@ class RollingStt:
             if gap > MAX_GAP_FILL_S * RATE:
                 self.reset_all()
                 self.expected = self._buf_start = self.utt_start = self.tail_start = pts
-                self._vad_pos = pts
+                self._vad_pos = self._fed = pts
             else:
                 x = np.concatenate([np.zeros(gap, np.float32), x])
         elif pts < self.expected:  # overlap (a resend): drop what we have
@@ -182,10 +219,13 @@ class RollingStt:
             del self._arrivals[:128]
         events = self._run_vad(x)
         # bound memory: an utterance longer than max_utterance_s loses its oldest tail-less audio
+        # (streaming: the handle keeps its own context; only the buffer is cut, the
+        # utterance start -- what word timings are relative to -- stays put)
         limit = int(self.max_utterance_s * RATE)
-        if self.end - self.tail_start > limit:
+        if self.end - self.tail_start > limit and not self.streaming:
             self.tail_start = self.end - limit
-        self._trim_to(min(self.tail_start, self._vad_pos) - RATE)
+        keep = self.tail_start if not self.streaming else max(self.tail_start, self.end - limit)
+        self._trim_to(min(keep, self._vad_pos) - RATE)
         return events
 
     def _run_vad(self, x: np.ndarray) -> list[dict[str, Any]]:
@@ -241,6 +281,10 @@ class RollingStt:
         self._last_partial_at = self.clock() if now is None else now
         upto = self.end
         self._last_partial_upto = upto
+        if self.streaming:
+            fed = max(self._fed, self.tail_start)
+            self._fed = upto
+            return PartialJob(self.audio(fed, upto), self.tail_start, upto, streaming=True)
         commit = None
         cs = ce = 0
         if upto - self.tail_start > self.max_tail_s * RATE:
@@ -257,6 +301,23 @@ class RollingStt:
             if end - start >= COMMIT_PAUSE_S * RATE and self.tail_start < start < upto - RATE:
                 return start + (end - start) // 2
         return max(self.tail_start + RATE, upto - 2 * RATE)
+
+    def decode_partial(
+        self, job: PartialJob, speaker: Any
+    ) -> tuple[str, list[tuple[str, float, float]] | None, str]:
+        """The partial's model work (runs on the STT lane): ``(commit_text,
+        commit_words | None, tail_text)``. Streaming: feed the new audio, take
+        the running text."""
+        if job.streaming:
+            return "", None, (self.stream.feed(job.tail) or "")
+        commit = None
+        if job.commit is not None and len(job.commit):
+            commit = speaker.transcribe_words(job.commit)
+        return (
+            commit[0] if commit else "",
+            commit[1] if commit else None,
+            speaker.transcribe(job.tail),
+        )
 
     def apply_commit(self, text: str, words: list[tuple[str, float, float]], start: int) -> None:
         self.committed.append(
@@ -296,7 +357,37 @@ class RollingStt:
         return 0
 
     def take_final(self, fid: Any = None) -> FinalJob:
+        if self.streaming:
+            fed = max(self._fed, self.tail_start)
+            self._fed = self.end
+            return FinalJob(self.audio(fed, self.end), self.tail_start, self.end, fid, True)
         return FinalJob(self.audio(self.tail_start, self.end), self.tail_start, self.end, fid)
+
+    def decode_final(
+        self, job: FinalJob, speaker: Any
+    ) -> tuple[str, list[tuple[str, float, float]]]:
+        """The final's model work (runs on the STT lane): tail text and
+        ``(word, start_s, end_s)`` relative to ``job.tail_start``. Streaming:
+        feed what is left, finalize; a model without word timings gets one
+        ``transcribe_words`` pass over the buffered utterance when the adapter
+        offers it (``stt.final.words`` is part of the frame)."""
+        if not job.streaming:
+            return speaker.transcribe_words(job.tail)
+        if len(job.tail):
+            self.stream.feed(job.tail)
+        text, words = self.stream.finalize()
+        text = (text or "").strip()
+        if text and not words:
+            fn = getattr(getattr(speaker, "stt", None), "transcribe_words", None)
+            if callable(fn):
+                start = max(job.tail_start, self._buf_start)
+                audio = self.audio(start, job.upto)
+                if len(audio) >= RATE // 10:
+                    text2, words2 = fn(audio)
+                    shift = (start - job.tail_start) / RATE
+                    text = (text2 or "").strip() or text
+                    words = [(w, s + shift, e + shift) for w, s, e in words2]
+        return text, list(words)
 
     def apply_final(
         self,
@@ -322,8 +413,12 @@ class RollingStt:
         }
         if job.fid is not None:
             frame["id"] = job.fid
-        # The next utterance starts at upto; later audio stays.
+        # The next utterance starts at upto; later audio stays (streaming: it is
+        # fed to the fresh handle by the next partial).
         self.utt_start = self.tail_start = job.upto
+        if self.streaming:
+            self._fed = job.upto
+            self._stream_reset()
         self.committed = []
         self._silences = [(s, e) for s, e in self._silences if s >= job.upto]
         self.had_speech = self.speech

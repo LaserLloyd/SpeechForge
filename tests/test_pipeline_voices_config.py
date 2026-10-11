@@ -12,7 +12,7 @@ import pytest
 from speechforge.config import Config, load_config, load_env_file, validate_for_serving
 from speechforge.engines.chatterbox import SAMPLES_PER_TOKEN, ChatterboxEngine, slice_prompt
 from speechforge.errors import BadRequest, ConfigError, NotFound
-from speechforge.pipeline import ChunkPlanConfig, Plan, pipelined
+from speechforge.pipeline import TRAILING_SILENCE, ChunkPlanConfig, Plan, pipelined
 from speechforge.voices import VoiceStore, parse_npz, parse_voice_id, sha256_hex
 from tests.conftest import make_voice
 
@@ -289,3 +289,92 @@ def test_launchers_are_crlf():
     for bat in (Path(__file__).resolve().parents[1] / "launchers").glob("*.bat"):
         data = bat.read_bytes()
         assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), bat.name
+
+
+def test_decoder_buckets_pad_and_trim():
+    from speechforge.engines.chatterbox import DECODE_BUCKETS, SILENCE, bucket_padding
+
+    assert bucket_padding(21, DECODE_BUCKETS) == 19  # 18 tokens + 3 silence -> 40
+    assert bucket_padding(40, DECODE_BUCKETS) == 0
+    assert bucket_padding(41, DECODE_BUCKETS) == 23  # -> 64
+    assert bucket_padding(999, DECODE_BUCKETS) == 0  # beyond the last bucket: unpadded
+    eng = TokenEngine(1)._eng
+    voice = slice_prompt(make_voice(prompt=200), 4.0)
+    seen: list[int] = []
+    inner = eng._run
+
+    def run(component, feeds):
+        seen.append(int(feeds["speech_tokens"].shape[1] - voice.prompt_token.shape[1]))
+        return inner(component, feeds)
+
+    eng._run = run
+    # 5 tokens + 3 trailing silence = 8 -> padded to 40; the audio is still 5 tokens
+    wav = eng.decode_chunk([SILENCE] * 5, voice, left_context=0)
+    assert seen == [40]
+    assert len(wav) == 5 * SAMPLES_PER_TOKEN
+    # the closing chunk keeps its 3 silence tokens but never the padding
+    wav = eng.decode_chunk([SILENCE] * 5, voice, left_context=0, keep_silence=True)
+    assert len(wav) == 8 * SAMPLES_PER_TOKEN
+    # warm_decoder visits every bucket exactly once
+    seen.clear()
+    assert eng.warm_decoder(voice) == list(DECODE_BUCKETS)
+    assert seen == list(DECODE_BUCKETS)
+
+
+def test_warm_lm_workers_degrades_when_a_worker_is_busy():
+    """A busy LM worker never reaches the barrier; the warm-up must then still
+    run on every thread it can get and must not fail the load."""
+    from speechforge import pipeline
+
+    lm_pool = pipeline._pools()[0]
+    release = threading.Event()
+    busy = lm_pool.submit(release.wait, 10.0)
+    ran: list[str] = []
+    lock = threading.Lock()
+
+    def fn() -> None:
+        with lock:
+            ran.append(threading.current_thread().name)
+
+    # Free the worker after the barrier has given up, so the queued task runs.
+    threading.Timer(0.6, release.set).start()
+    t0 = time.perf_counter()
+    assert pipeline.warm_lm_workers(fn, barrier_timeout_s=0.2) == pipeline.LM_WORKERS
+    assert time.perf_counter() - t0 < 5.0
+    assert busy.result(timeout=5.0) is True
+    assert len(ran) == pipeline.LM_WORKERS
+    assert all(name.startswith("sf-tts-lm") for name in ran)
+    # Unloaded pool: every task lands on its own thread.
+    ran.clear()
+    assert pipeline.warm_lm_workers(fn, barrier_timeout_s=5.0) == pipeline.LM_WORKERS
+    assert len(set(ran)) == pipeline.LM_WORKERS
+
+
+@pytest.mark.parametrize(
+    ("delay_s", "expect_small"),
+    [(0.0005, False), (0.03, True)],  # fast LM keeps 25-token chunks; a slow one shrinks them
+)
+def test_pipelined_sizes_chunks_to_the_token_rate(delay_s, expect_small):
+    eng = TokenEngine(120, delay_s=delay_s)
+    voice = slice_prompt(make_voice(prompt=200), 4.0)
+    stats: dict = {}
+    plan = ChunkPlanConfig(10, 25, 8, 3, 4.0)
+    out = np.concatenate(list(pipelined(eng, "x", voice, plan=plan, stats=stats)))
+    sizes = stats["chunk_tokens"]
+    assert sizes[0] == 10
+    assert sum(sizes) == 120 and len(out) == (120 + TRAILING_SILENCE) * SAMPLES_PER_TOKEN
+    if expect_small:
+        # 30 ms per token against 40 ms of audio per token: the second chunk must be
+        # smaller than the fixed 25 or the first chunk's 400 ms would run out first
+        assert sizes[1] < 25 and all(plan.min_chunk <= s <= 25 for s in sizes[1:-1])
+    else:
+        assert sizes[1] == 25
+
+
+def test_pipelined_adaptive_off_keeps_fixed_chunks():
+    eng = TokenEngine(60, delay_s=0.03)
+    voice = slice_prompt(make_voice(prompt=200), 4.0)
+    stats: dict = {}
+    plan = ChunkPlanConfig(10, 25, 8, 3, 4.0, adaptive=False)
+    list(pipelined(eng, "x", voice, plan=plan, stats=stats))
+    assert stats["chunk_tokens"][:2] == [10, 25]

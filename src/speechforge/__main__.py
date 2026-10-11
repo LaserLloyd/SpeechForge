@@ -2,13 +2,17 @@
 
 speechforge serve [--port N --host IP --no-lease]   run the server (foreground)
 speechforge supervise                               the restart loop (the launcher runs this)
+speechforge tray                                    system-tray controller: adopts a running
+                                                    server or launches the supervisor (S23)
 speechforge fetch-models [--group tts-fp16 ...]     download what models.lock lists, verified
 speechforge verify-models [--full]                  re-check sizes/stamps (or every sha256)
 speechforge doctor                                  driver, CUDA, ORT, cards, models, bind, token,
                                                     firewall, StudioForge (names only, no secrets)
 speechforge token new|rotate|fingerprint
 speechforge bench --url ws://HOST:1236/v1/realtime [--corpus DIR] [--soak S]
-speechforge update --check|--apply|--rollback --bundle FILE [--tag T]
+speechforge update --check|--apply|--rollback [--source URL|PATH] [--tag T]
+                                                    source: a git URL or a bundle/clone path
+                                                    (default: the release's origin, else GitHub)
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from typing import Any
 
 from speechforge import __version__
 from speechforge.config import (
+    DATA_DIR_ENV,
     ENV_FILE_NAME,
     TOKEN_ENV,
     Config,
@@ -120,6 +125,18 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     return supervise(config.server.port, config.state_dir, extra_args=extra, root=root)
 
 
+def cmd_tray(args: argparse.Namespace) -> int:
+    """The system-tray controller (S23). Needs the ``tray`` extra; it says so."""
+    from speechforge.tray import main as tray_main
+
+    try:
+        config = _load(args)
+    except ConfigError as exc:
+        print(f"[FAIL] config            {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    return tray_main(config, args.config)
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     from speechforge import models
 
@@ -166,6 +183,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"[FAIL] config            {exc}")
         return EXIT_CONFIG
     _line(None, "version", f"{__version__} (python {platform.python_version()})")
+    _line(None, "layout", _layout_detail(config))
     if sys.platform == "win32":
         build = sys.getwindowsversion().build  # type: ignore[attr-defined]
         good &= _line(
@@ -253,6 +271,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         good &= _doctor_windows(config)
     print("\nOK" if good else "\nPROBLEMS FOUND")
     return 0 if good else 1
+
+
+def _layout_detail(config: Config) -> str:
+    """Which layout this is running from, and where the data lives.
+
+    ``releases`` = install.ps1's ``<root>\\releases\\<tag>`` + ``current`` junction;
+    ``checkout`` = a plain clone (a developer layout), where the data dir comes from
+    ``SPEECHFORGE_DATA_DIR`` or defaults to ``<repo>/data`` and there is no junction
+    to look for.
+    """
+    from speechforge.update import current_target, release_from_here, root_from_here
+
+    data_from = "from " + DATA_DIR_ENV if os.environ.get(DATA_DIR_ENV, "").strip() else "default"
+    root = (
+        Path(os.environ["SPEECHFORGE_ROOT"])
+        if os.environ.get("SPEECHFORGE_ROOT")
+        else root_from_here()
+    )
+    if root is None:
+        return f"checkout {release_from_here()}; data {config.data_dir} ({data_from})"
+    cur = current_target(root)
+    current = cur.name if cur else "MISSING (install.ps1 or update --apply creates it)"
+    return f"releases under {root}; current -> {current}; data {config.data_dir} ({data_from})"
 
 
 def _doctor_nvml(config: Config) -> bool:
@@ -415,19 +456,22 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     config = load_config(args.config)
     root = Path(args.root) if args.root else update.root_from_here()
+    source = args.source or update.default_source()
+    if args.check:
+        # Needs no layout: a plain checkout can ask what is published too.
+        tags = update.source_tags(source)
+        cur = update.current_target(root) if root else None
+        newest = f"; newest {tags[-1]}" if tags else ""
+        print(
+            f"current: {cur.name if cur else '-'}; source {source}; "
+            f"release tags: {', '.join(tags) or '-'}{newest}"
+        )
+        return 0
     if root is None:
         print("not running from a releases/<tag> layout; pass --root")
         return 1
     if args.rollback:
         return update.rollback(root, config.data_dir)
-    if not args.bundle:
-        print("--bundle FILE is required (SpeechForge has no remote)")
-        return 1
-    if args.check:
-        tags = update.bundle_tags(Path(args.bundle))
-        cur = update.current_target(root)
-        print(f"current: {cur.name if cur else '-'}; bundle tags: {', '.join(tags) or '-'}")
-        return 0
     from speechforge.auth import TokenStore
 
     ts = TokenStore(config.env_file)
@@ -439,7 +483,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     voice = _bench_voice(args)
     return update.apply(
         root,
-        Path(args.bundle),
+        source,
         args.tag,
         token=ts._current,
         voice=voice,
@@ -448,7 +492,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="speechforge",
         description=__doc__,
@@ -468,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="")
     p.add_argument("--no-lease", action="store_true")
     add("supervise", cmd_supervise, "run the server under the restart loop")
+    add("tray", cmd_tray, "system-tray controller (adopts a running server or launches supervise)")
     p = add("fetch-models", cmd_fetch, "download the models in models.lock")
     p.add_argument(
         "--group", action="append", help="lock group(s), e.g. tts-fp16 (default: what config needs)"
@@ -500,10 +545,21 @@ def main(argv: list[str] | None = None) -> int:
             g.add_argument("--check", action="store_true")
             g.add_argument("--apply", action="store_true")
             g.add_argument("--rollback", action="store_true")
-            p.add_argument("--bundle", default="")
-            p.add_argument("--tag", default=None)
+            p.add_argument(
+                "--source",
+                "--bundle",
+                dest="source",
+                default="",
+                help="git URL, or a bundle/clone path (default: the release's origin, "
+                "else the public repository); --bundle is the old name",
+            )
+            p.add_argument("--tag", default=None, help="release tag (default: the newest v*)")
             p.add_argument("--root", default="")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return int(args.fn(args) or 0)
 
 
