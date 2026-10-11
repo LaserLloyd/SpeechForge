@@ -385,8 +385,10 @@ def probe_ready(port: int, token: str) -> tuple[dict[str, Any] | None, str]:
 
 
 def make_icon_image(colour: str, size: int = 64) -> Any:
-    """Rounded square, "SF" glyph, status dot in the corner (Pillow)."""
-    from PIL import Image, ImageDraw, ImageFont
+    """Rounded square, a mouth seen from the side speaking to the right (two sound
+    arcs), status dot in the corner (Pillow). Not letters: StudioForge's tray already
+    shows "SF"."""
+    from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -398,24 +400,18 @@ def make_icon_image(colour: str, size: int = 64) -> Any:
         outline=ICON_TEAL,
         width=max(2, size // 24),
     )
-    font = None
-    for name in ("arialbd.ttf", "seguisb.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
-        with contextlib.suppress(OSError):
-            font = ImageFont.truetype(name, max(8, int(size * 0.42)))
-            break
-    if font is None:
-        try:
-            font = ImageFont.load_default(size=max(8, int(size * 0.42)))
-        except TypeError:
-            font = ImageFont.load_default()
-    try:
-        d.text((size / 2, size * 0.46), "SF", font=font, fill=ICON_TEAL, anchor="mm")
-    except (ValueError, TypeError):
-        d.text((size * 0.22, size * 0.26), "SF", font=font, fill=ICON_TEAL)
-    r = size * 0.185
-    cx = cy = size - pad - r * 0.95
+    # The head: a disc with a wedge open to the right (the mouth, 70 degrees wide).
+    hx0, hy0, hx1, hy1 = size * 0.14, size * 0.22, size * 0.62, size * 0.70
+    d.pieslice([hx0, hy0, hx1, hy1], start=35, end=325, fill=ICON_TEAL)
+    # Two sound arcs leaving the mouth.
+    cx, cy = size * 0.50, size * 0.46
+    w = max(2, size // 14)
+    for r in (size * 0.19, size * 0.28):
+        d.arc([cx - r, cy - r, cx + r, cy + r], start=-38, end=38, fill=ICON_TEAL, width=w)
+    r = size * 0.17
+    dx = dy = size - pad - r * 0.95
     d.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
+        [dx - r, dy - r, dx + r, dy + r],
         fill=COLOURS.get(colour, COLOURS["grey"]),
         outline=ICON_BG,
         width=max(1, size // 32),
