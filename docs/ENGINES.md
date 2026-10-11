@@ -243,6 +243,22 @@ knobs to sweep. Compare with `--engine chatterbox --voice <add-on npz>` on the s
 
 ## dots-tts (dots.tts-mf) -- TTS candidate, phase 2
 
+**Measured on the host, 2026-10-11 [M]** (RTX 5090, native backend, dots.tts 0.3.1 eager, torch
+2.11 cu130, 4 MeanFlow steps, voice from the 12.6 s synthetic self-test clip + transcript,
+`scripts/gpu_smoke_dots_tts.py --runs 3`):
+
+| Precision | Load | First run (graph/alloc warm-up) | TTFA warm | RTF warm | Peak VRAM |
+| --- | --- | --- | --- | --- | --- |
+| fp32 | 38.7 s | 10.5 s to first audio | 399-404 ms | 0.95-0.96 | 10.25 GiB |
+| bf16 / fp16 | 30 s | fails: `mat1 and mat2 must have the same dtype (Float and BFloat16/Half)` inside the runtime's decode step | - | - | - |
+
+Native Windows does run (the `tn` shim works; `vocoder.safetensors` had been missing from the
+lock and is now pinned). At fp32 eager it is far behind Qwen3-TTS on the same card (first audio
+400 vs 159 ms, RTF 0.95 vs 0.3); the half-precision paths need a cast of the latent inputs in
+the adapter (or upstream) before they can be measured, and `--optimize` (torch.compile) needs a
+Triton build for Windows. Bake-off verdict for now: Qwen3-TTS first; dots.tts parked until the
+dtype fix.
+
 Adapter: `src/speechforge/engines/dots_tts.py`; name `dots-tts`; voice format `dotstts-ref`;
 config `tts.engine: dots-tts` + `tts.dots.*`; model groups `tts-dots` / `tts-dots-stts`;
 tests `tests/test_dots_tts.py`; GPU smoke `scripts/gpu_smoke_dots_tts.py`.
@@ -426,6 +442,21 @@ examples/configs/dots_tts.yaml --port 8000`, loopback) and `tts.dots.backend: ht
 ---
 
 ## Nemotron Speech Streaming EN 0.6B (STT, `stt.engine: nemotron`)
+
+**Measured on the host, 2026-10-11 [M]** (RTX 5090, `backend: subprocess` with sherpa-onnx
+1.13.8+cuda12.cudnn9 in its own venv, fp32 160 ms export, the 12.6 s synthetic self-test clip fed
+at wall-clock speed, `scripts/gpu_smoke_stt.py --realtime`; Parakeet TDT fp32 on the same card as
+the reference):
+
+| Engine | Partials | Cost per partial | Lag behind the mic | Final | RTF |
+| --- | --- | --- | --- | --- | --- |
+| Nemotron streaming | 79 at a 160 ms cadence, true incremental | mean 28 ms, p90 30 ms, max 53 ms | ~30 ms | 75 ms, word-perfect, with word timings | 0.18 |
+| Parakeet rolling re-decode | 79 at a 160 ms cadence | mean 85 ms, p90 106 ms, max 114 ms | - | 77 ms | 0.53 |
+
+Both transcribe the clip exactly (Parakeet drops one comma). The streaming model does a third
+of the GPU work per partial and never re-decodes the tail, so its cost does not grow with the
+utterance; what it costs is a second Python process and a second CUDA runtime on the card.
+Not yet measured: the RTX 3090, WER on the family corpus, and end-of-turn interplay.
 
 **Status (2026-10-11):** implemented and unit-tested on CPU fakes; **not yet run with the real
 model on any machine** (the agent that wrote it had no GPU and downloaded no weights). The

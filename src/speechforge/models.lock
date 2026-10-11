@@ -1042,6 +1042,15 @@
    "dest": "nemotron-speech-streaming-en-0.6b/160ms/joiner.int8.onnx",
    "size": 1735862,
    "sha256": "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23"
+  },
+  {
+   "groups": [
+    "tts-dots"
+   ],
+   "url": "https://huggingface.co/dots-studio/dots.tts-mf/resolve/c28105adc8228143392b4e346994ff613ee48a06/vocoder.safetensors",
+   "dest": "dots-tts-mf/vocoder.safetensors",
+   "size": 723585584,
+   "sha256": "c0e45c08f480df67ac4c354b465355fcc7e2f6c8765263b6dfeddd1f4671c93d"
   }
  ]
 }
