@@ -40,7 +40,7 @@ from this repository (`-Source <git URL | bundle | clone path>` for a fork or an
 `-Tag` to pin one): driver/OS checks, uv, `releases\<tag>` + `current` layout, locked
 environment, hash-verified models, token shown once, firewall rule scoped to the box
 (`-BoxAddress`; the whole tailnet range when omitted), mini dumps, an at-logon **tray** (an "SF"
-icon with a status dot, like the other Forges on the host; DECISIONS S23), `doctor`.
+icon with a status dot, like the other Forges on the host; DECISIONS S25), `doctor`.
 Re-running it is safe. Updates are blue/green from the same source with a canary self-test and
 automatic rollback. A plain checkout with `SPEECHFORGE_DATA_DIR` set works too (the developer
 layout). Details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).

@@ -1,4 +1,4 @@
-"""A system-tray controller for the server (DECISIONS S23).
+"""A system-tray controller for the server (DECISIONS S25).
 
 ``speechforge tray`` puts an "SF" icon in the notification area, like the other
 Forges on the same host. It is a *controller*, not a second supervisor:
