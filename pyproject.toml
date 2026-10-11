@@ -79,6 +79,13 @@ tts-torch = [
 stt-nemotron = [
     "sherpa-onnx>=1.13.0,<1.14",
 ]
+# The system-tray controller (`speechforge tray`, DECISIONS S23): pystray puts
+# the icon in the notification area, Pillow draws it. Desktop host only; the
+# module imports both lazily, so nothing else in the package needs them.
+tray = [
+    "pystray>=0.19",
+    "pillow>=10",
+]
 dev = [
     "pytest>=8.3,<10",
     "pytest-asyncio>=1.0,<2",

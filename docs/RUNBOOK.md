@@ -32,7 +32,11 @@ Layout after `install.ps1`: `C:\SpeechForge\releases\<tag>\` (a clone + its `.ve
    the firewall rule and the Startup launcher are rewritten.
 4. Copy the printed token to the box (`SPEECHFORGE_TOKEN=` in the add-on's env file). Never
    paste it into a chat or a commit.
-5. Start it: `C:\SpeechForge\current\launchers\Start SpeechForge.bat` (or log off and on).
+5. Start it: `C:\SpeechForge\current\launchers\SpeechForge Tray.bat` puts an "SF" icon in the
+   notification area (grey = no server, amber = loading/cooldown/idle, green = ready, blue =
+   sessions open, red = crash loop or health failing, purple = vacating / lease lost) and
+   launches the supervisor; `Start SpeechForge.bat` runs the same supervisor in a console
+   instead. Logging off and on starts the tray.
 6. From the box: `curl http://<host tailnet IP>:1236/health` -> `{"ok":true,...}`.
 
 ## Run from a checkout (developer layout)
@@ -72,6 +76,14 @@ share the port and the StudioForge lease.
 ## Everyday
 
 * `GET /health` (no auth), `GET /ready` (token), `GET /metrics` (on the host, token).
+* The tray (`speechforge tray`, `SpeechForge Tray.bat`): polls `/health` every 2 s and
+  `/ready` every 5 s (token from `speechforge.env`, never shown); the tooltip carries state,
+  card, sessions, lease and the self-test TTFA. Menu: logs / data folder, copy the health URL,
+  **Restart server** (`state\restart.request`, the supervisor's graceful restart), **Stop
+  server** (`state\stop.request`; only a supervisor the tray launched -- an adopted one is
+  left alone and the menu says so), **Start at logon** (the Startup-folder `SpeechForge.bat`),
+  **Quit tray** (asks before stopping a server it launched; an adopted one keeps running).
+  Tray log: `logs\tray.log`; the launched supervisor's console: `logs\supervisor.out.log`.
 * `sfctl status` shows a `speechforge` lease on CUDA 3 while a voice chat is open and for
   15 minutes after the last one closes.
 * Logs: `C:\SpeechForge\data\logs\speechforge.jsonl` (JSON lines, 10 MB x 5, no content).
@@ -104,8 +116,10 @@ A failed canary leaves `current` untouched. Manual rollback:
 `Update SpeechForge.bat rollback` (switches `current` to the previous release and restarts).
 The supervisor process itself picks up a new release at the next logon.
 
-To take SpeechForge out of service: close its window and delete
-`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\SpeechForge.bat`. The box falls back
+To take SpeechForge out of service: **Quit tray** (it offers to stop the server it launched;
+close the console window instead when `Start SpeechForge.bat` runs it) and untick **Start at
+logon** or delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\SpeechForge.bat`.
+The box falls back
 to its CPU on the first refused connection; a leftover lease expires on StudioForge's idle TTL
 (20 min) or is released at the next start.
 

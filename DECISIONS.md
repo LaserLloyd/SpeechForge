@@ -345,3 +345,20 @@ allocations at load rather than in a conversation.
 * **Trial order for phase 2:** Qwen3-TTS, then dots.tts, then Nemotron; each measured with
   its GPU smoke script before any wider wiring.
 * **The long-term voice (D2) is decided by the family listening test**, not by latency alone.
+
+## S25 -- A tray, like the other Forges
+
+**Decision.** `speechforge tray` (extra `tray`: pystray + Pillow, imported lazily) puts an "SF"
+icon with a status dot in the notification area beside the other Forges' trays. It is a
+controller, not a second supervisor: it **adopts** a server whose `/health` already answers,
+else launches `speechforge supervise` as a window-less child with the same data dir; it polls
+`/health` (2 s, no auth) and `/ready` (5 s, token from the env file, never shown or logged);
+restart and stop are file requests the supervisor honours (`state/restart.request`, new
+`state/stop.request` -- a console signal cannot reach a child that has no console), and the
+stop applies only to a supervisor the tray launched. `install.ps1` points the Startup entry at
+`SpeechForge Tray.bat`; `Start SpeechForge.bat` (console) is unchanged.
+
+**Why.** The host already shows ClawChat, ClawForge and StudioForge as icons; a console
+window for the fourth service was the odd one out, and "is it ready, is anything connected,
+did the lease go" should be a glance, not a `curl`. Adopt-or-launch keeps one supervisor per
+port whichever launcher started it.

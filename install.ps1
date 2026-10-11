@@ -173,9 +173,9 @@ set "SPEECHFORGE_DATA_DIR=$data"
 }
 
 # ------------------------------------------------------------------ 4. environment
-Step 4 "uv sync --locked --extra gpu"
+Step 4 "uv sync --locked --extra gpu --extra tray"
 Push-Location $rel
-uv sync --locked --extra gpu --extra dev
+uv sync --locked --extra gpu --extra tray --extra dev
 if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "uv sync failed" }
 Pop-Location
 $py = Join-Path $rel ".venv\Scripts\python.exe"
@@ -252,15 +252,17 @@ New-ItemProperty -Force -Path $wer -Name DumpFolder -PropertyType ExpandString `
 
 # ------------------------------------------------------------------ 9. start at logon + doctor
 if ($SkipStartup) {
-  Step 9 "Startup-folder launcher: skipped (-SkipStartup); doctor"
+  Step 9 "Startup-folder tray launcher: skipped (-SkipStartup); doctor"
 } else {
-  Step 9 "Startup-folder launcher and doctor"
+  # The tray (DECISIONS S23) adopts a running server or launches the supervisor
+  # itself; the tray's own "Start at logon" item writes this same file.
+  Step 9 "Startup-folder tray launcher and doctor"
   $startup = [Environment]::GetFolderPath("Startup")
 @"
 @echo off
-start "SpeechForge" /min "$current\launchers\Start SpeechForge.bat"
+start "SpeechForge" /min "$current\launchers\SpeechForge Tray.bat"
 "@ | Set-Content -Encoding ASCII (Join-Path $startup "SpeechForge.bat")
 }
 & $py -m speechforge doctor
-Write-Host "`nInstalled $Tag from $Source. Start it now: `"$current\launchers\Start SpeechForge.bat`" (or log off/on)." -ForegroundColor Green
+Write-Host "`nInstalled $Tag from $Source. Start it now: `"$current\launchers\SpeechForge Tray.bat`" (tray icon; or `"Start SpeechForge.bat`" for a console, or log off/on)." -ForegroundColor Green
 Write-Host "Updates: `"$current\launchers\Update SpeechForge.bat`" (same source) or `"$py`" -m speechforge update --check" -ForegroundColor Green
