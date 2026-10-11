@@ -143,6 +143,8 @@ current ONNX export and loop do not do.
   initial chunk (`create_and_register_allocator` + `session.use_env_allocators`), so the
   allocation ramp is one call at load and the per-session arenas disappear;
   `optimized_model_filepath` caches; loading STT and TTS sessions in parallel threads.
+  The shared arena is implemented behind `gpu.shared_arena` (DECISIONS S24) and measured
+  with `scripts/gpu_cold_load.py`; its numbers go here when they exist.
   On the host `warm_on_boot: true` and a longer `idle_unload_s` hide the cost, at the
   price of holding the lease longer (a tier-1 load still vacates it, D56).
 * The corpus gates and every box-side gate.

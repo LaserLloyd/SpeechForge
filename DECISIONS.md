@@ -362,3 +362,36 @@ stop applies only to a supervisor the tray launched. `install.ps1` points the St
 window for the fourth service was the odd one out, and "is it ready, is anything connected,
 did the lease go" should be a glance, not a `curl`. Adopt-or-launch keeps one supervisor per
 port whichever launcher started it.
+
+## S24 -- One arena for every session (measured pending)
+
+**Decision.** With `gpu.shared_arena: true` (the default) and the CUDA provider, `load_speaker`
+registers one ONNX Runtime arena for the card before the first session is created --
+`create_and_register_allocator_v2("CUDAExecutionProvider", OrtMemoryInfo("Cuda", ARENA, device,
+DEFAULT), {device_id}, OrtArenaCfg{...})` -- and every session (Chatterbox's four, Parakeet's
+through onnx-asr's `sess_options`, Smart Turn) sets `session.use_env_allocators = 1`. The arena's
+first chunk is `gpu.arena_initial_mb` (default and ceiling 2047 MiB), it extends power-of-two (S22)
+and is capped at twice `gpu.mem_limit_mb`. Registration is once per device per process; a refusal
+logs one warning and the load continues with per-session arenas, which every session also keeps
+in its provider options as the floor. `/ready` reports `gpu.shared_arena`.
+
+**Why.** The cold load is 33.7 s against a 10 s target (`docs/BENCHMARKS.md`, "Open"): ~9 s of
+session creation and ~20 s of warm-up that is believed to be six arenas each growing to their
+working set. One arena with a large first chunk makes that ramp one allocation at load and lets
+the sessions share free blocks instead of each holding its own high-water mark.
+
+**What the runtime allows (checked against onnxruntime-gpu 1.31.0).** The plain
+`create_and_register_allocator(OrtMemoryInfo, OrtArenaCfg)` refuses CUDA memory ("Only CPU devices
+are supported. Please call CreateAndRegisterAllocatorV2() for other device"), so the CUDA path is
+the v2 call with the provider name and a provider-options mapping. `OrtArenaCfg.initial_chunk_size_bytes`
+is a 32-bit int: 2047 MiB is the largest first chunk the wheel accepts (2048 and 4096 MiB fail at
+construction), hence the bound. There is no Python call to unregister an environment allocator.
+
+**To be measured (`scripts/gpu_cold_load.py`, both `--shared` and `--no-shared`, fp16, the serving
+card).** Cold load: session creation and warm-up time separately, against 9 s + 20 s. Footprint:
+NVML used after warm-up (7.2 GB today) and whether it stays fixed over a soak. First audio: TTFA
+p50/p90 and RTF through `speechforge bench` must be unchanged (190 / 226 ms, 0.23). Unload:
+whether the card's used memory returns to its baseline after `close()` -- an environment arena
+outlives the sessions, so if it keeps its chunks the default must become `false` for a tenant
+that gives the card back (S3), or the unload must shrink it. The decision stands as "on by default"
+only if the load gets faster and the footprint and TTFA hold.
