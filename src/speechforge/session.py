@@ -633,7 +633,7 @@ class SessionManager:
         for s in list(self.sessions.values()):
             if s.closed or (
                 s.detached_at is not None
-                and now - s.detached_at > self.config.realtime.resume_window_s
+                and now - s.detached_at >= self.config.realtime.resume_window_s
             ):
                 self.forget(s)
 
