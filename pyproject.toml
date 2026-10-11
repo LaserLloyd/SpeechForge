@@ -63,6 +63,10 @@ tts-torch = [
     "torch==2.11.0",
     "torchaudio==2.11.0",
     "faster-qwen3-tts>=0.5.4,<0.6",
+    # qwen-tts-hf declares transformers >=5.15.1,<6, but 5.19 broke it (MimiConfig lost
+    # rope_theta; measured on the host 2026-10-11) and 4.x lacks standardize_rope_params.
+    # Only 5.15.1 is tested; widen after a smoke run.
+    "transformers>=5.15.1,<5.16",
     "soundfile>=0.13",
 ]
 # NVIDIA Nemotron Speech Streaming through sherpa-onnx (`stt.engine: nemotron`,

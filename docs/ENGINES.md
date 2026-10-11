@@ -19,6 +19,23 @@ vendor or third-party claim, **[M]** measured here, **[U]** unverified.
 
 ## Qwen3-TTS (`tts.engine: qwen3-tts`) -- phase-2 candidate
 
+**Measured on the host, 2026-10-11 [M]** (RTX 5090, bf16, faster-qwen3-tts 0.5.4 with CUDA
+graphs, torch 2.11 cu130, transformers 5.15.1; voice built in-context from the 12.6 s synthetic
+self-test clip + its transcript; `scripts/gpu_smoke_tts.py`):
+
+| Model | chunk_size | TTFA warm (3 lines) | RTF | Load + graph capture |
+| --- | --- | --- | --- | --- |
+| 1.7B | 8 (default) | 232-351 ms, p50 239 | 0.33-0.42 | 15 s + 18 s |
+| 1.7B | 4 | 158-277 ms, p50 159 | 0.32-0.39 | 14 s + 18 s |
+| 0.6B | 4 | 150-278 ms, p50 153 | 0.29-0.35 | 13 s + 18 s |
+
+The first line after a load is ~120 ms slower than the rest (the graphs' first replay). At
+`chunk_size: 4` the 0.6B model meets the spec's 150 ms p50 first-audio target and the 1.7B is
+within 10 ms of it; both are ~30 ms ahead of fp16 Chatterbox on the 3090 (190 ms) at a slightly
+higher RTF (0.3 vs 0.23). Not yet measured: the RTX 3090 (sm_86), two concurrent sessions, and
+what the family hears (docs/LISTENING-TEST.md). transformers 5.19 fails at load
+(`MimiConfig has no rope_theta`); the extra pins `>=5.15.1,<5.16` (only 5.15.1 is tested; widen after a smoke run).
+
 **One line.** Alibaba's Qwen3-TTS-12Hz-1.7B-Base (or 0.6B-Base), weights Apache-2.0, run with
 `faster-qwen3-tts` (MIT; PyTorch CUDA graphs, chunked streaming) on the leased card. It
 clones a voice *in context* from a reference clip and its transcript, which puts a recording of
