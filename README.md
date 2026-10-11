@@ -39,7 +39,8 @@ One elevated run of [`install.ps1`](install.ps1) installs the newest `v*` releas
 from this repository (`-Source <git URL | bundle | clone path>` for a fork or an offline bundle;
 `-Tag` to pin one): driver/OS checks, uv, `releases\<tag>` + `current` layout, locked
 environment, hash-verified models, token shown once, firewall rule scoped to the box
-(`-BoxAddress`; the whole tailnet range when omitted), mini dumps, at-logon launcher, `doctor`.
+(`-BoxAddress`; the whole tailnet range when omitted), mini dumps, an at-logon **tray** (an "SF"
+icon with a status dot, like the other Forges on the host; DECISIONS S23), `doctor`.
 Re-running it is safe. Updates are blue/green from the same source with a canary self-test and
 automatic rollback. A plain checkout with `SPEECHFORGE_DATA_DIR` set works too (the developer
 layout). Details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
@@ -47,6 +48,7 @@ layout). Details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 | Command | What |
 | --- | --- |
 | `speechforge serve` / `supervise` | the server / the restart loop the launcher runs |
+| `speechforge tray` | system-tray controller (`tray` extra): adopts a running server or launches `supervise`; status dot, restart, stop, logs, start at logon |
 | `speechforge doctor [--full]` | driver R580+, CUDA, ORT window, cards (sm), models.lock, bind, token, firewall |
 | `speechforge fetch-models` / `verify-models` | download / re-check every file against `models.lock` |
 | `speechforge token new\|rotate\|fingerprint` | 256-bit bearer token; rotation keeps the old one 5 minutes |
