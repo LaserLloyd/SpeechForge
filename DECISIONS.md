@@ -328,3 +328,20 @@ StudioForge plans with (S5). With power-of-two extension the same runs grew 54 M
 14 MiB (STT) and the total card use was 7.1 GB instead of 8.5 GB, at the same speed. The two
 extra warm-up items make the first long sentence and the longest partial window pay their
 allocations at load rather than in a conversation.
+
+## S23 -- Owner decisions after the first host build (2026-10-11)
+
+* **D3: reference clips may be stored on the host for the phase-2 bake-off.** The host's
+  config sets `voices.allow_reference_clip: true`; the clip lives in the user-only voices
+  folder (never indexed, never backed up, deleted with the profile) and never leaves the
+  machine. The repository default stays `false`.
+* **Nemotron Speech Streaming is approved for private use only** (NVIDIA Open Model License):
+  it stays off by default and is never recommended in public documents.
+* **fp16 Chatterbox stays a host setting** until the speaker-similarity check of SPEC §11.3
+  has run with the owner's voice (S19).
+* **Residency on the host:** `warm_on_boot: true` and `idle_unload_s: 3600`, so the cold load
+  is paid at logon and a quiet hour keeps the card; a tier-1 (chat model) lease still vacates
+  it within the drain budget (StudioForge D56).
+* **Trial order for phase 2:** Qwen3-TTS, then dots.tts, then Nemotron; each measured with
+  its GPU smoke script before any wider wiring.
+* **The long-term voice (D2) is decided by the family listening test**, not by latency alone.
