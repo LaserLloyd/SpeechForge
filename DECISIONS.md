@@ -363,7 +363,7 @@ window for the fourth service was the odd one out, and "is it ready, is anything
 did the lease go" should be a glance, not a `curl`. Adopt-or-launch keeps one supervisor per
 port whichever launcher started it.
 
-## S24 -- One arena for every session (measured pending)
+## S24 -- One arena for every session (measured: off by default)
 
 **Decision.** With `gpu.shared_arena: true` (the default) and the CUDA provider, `load_speaker`
 registers one ONNX Runtime arena for the card before the first session is created --

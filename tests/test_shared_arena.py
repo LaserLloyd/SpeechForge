@@ -144,7 +144,7 @@ def ort(monkeypatch):
 # ------------------------------------------------------------------ config
 def test_gpu_config_defaults_and_bounds():
     gpu = GpuConfig()
-    assert gpu.shared_arena is True and gpu.arena_initial_mb == arena.ARENA_INITIAL_MB_MAX
+    assert gpu.shared_arena is False and gpu.arena_initial_mb == arena.ARENA_INITIAL_MB_MAX
     assert GpuConfig(arena_initial_mb=64).arena_initial_mb == 64
     with pytest.raises(ValidationError):
         GpuConfig(arena_initial_mb=2048)  # the runtime's int32 field refuses 2 GiB
@@ -164,7 +164,7 @@ def test_arena_cfg_sizes_follow_the_config():
 
 # ------------------------------------------------------------ registration
 def test_registers_once_per_device_with_the_configured_sizes(ort):
-    gpu = GpuConfig(devices=[3], mem_limit_mb=6144, arena_initial_mb=2047)
+    gpu = GpuConfig(devices=[3], mem_limit_mb=6144, arena_initial_mb=2047, shared_arena=True)
     assert arena.ensure_shared_arena(gpu, 3) is True
     assert arena.ensure_shared_arena(gpu, 3) is True  # idempotent: a reload after an unload
     assert len(ort.registrations) == 1
@@ -192,7 +192,7 @@ def test_a_refused_registration_falls_back_with_one_warning(monkeypatch, caplog)
     monkeypatch.setattr(arena, "_REGISTERED", {})
     broken = fake_ort(register_error=RuntimeError("CUDA failure: device busy"))
     monkeypatch.setitem(sys.modules, "onnxruntime", broken)
-    gpu = GpuConfig(devices=[3])
+    gpu = GpuConfig(devices=[3], shared_arena=True)
     with caplog.at_level(logging.WARNING, logger="speechforge.arena"):
         assert arena.ensure_shared_arena(gpu, 3) is False
     assert not arena.in_use(3)
@@ -208,7 +208,7 @@ def test_a_wheel_without_v2_falls_back_and_names_the_api(monkeypatch, caplog):
     monkeypatch.setattr(arena, "_REGISTERED", {})
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort(with_v2=False))
     with caplog.at_level(logging.WARNING, logger="speechforge.arena"):
-        assert arena.ensure_shared_arena(GpuConfig(), 3) is False
+        assert arena.ensure_shared_arena(GpuConfig(shared_arena=True), 3) is False
     assert "create_and_register_allocator_v2" in caplog.text
 
 
@@ -216,7 +216,7 @@ def test_an_already_registered_arena_counts_as_ours(monkeypatch):
     monkeypatch.setattr(arena, "_REGISTERED", {})
     dup = RuntimeError("An allocator for this device has already been registered for sharing.")
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort(register_error=dup))
-    assert arena.ensure_shared_arena(GpuConfig(), 3) is True
+    assert arena.ensure_shared_arena(GpuConfig(shared_arena=True), 3) is True
     assert arena.in_use(3)
 
 
@@ -323,6 +323,7 @@ def test_loaders_follow_the_registry(ort, tokenizers, monkeypatch, tmp_path, con
     from speechforge.engines import chatterbox_tts
 
     config.models.dir = tmp_path
+    config.gpu.shared_arena = True
     _chatterbox_dir(tmp_path, "fp32")
     tts = chatterbox_tts.load(config, 3)
     assert tts.engine.shared_arena is False  # nothing registered for CUDA 3 yet
