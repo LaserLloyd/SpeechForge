@@ -352,11 +352,21 @@ class Speaker:
     the (CPU) VAD. Thread-safe as far as the adapters are (each serialises its
     own model calls)."""
 
-    def __init__(self, tts: Any, stt: Any, *, eou: Any = None, vad: Any = None) -> None:
+    def __init__(
+        self,
+        tts: Any,
+        stt: Any,
+        *,
+        eou: Any = None,
+        vad: Any = None,
+        shared_arena: bool = False,
+    ) -> None:
         self.tts = tts
         self.stt = stt
         self.eou = eou
         self.vad = vad
+        #: Every CUDA session uses the one environment arena (S24); /ready reports it.
+        self.shared_arena = bool(shared_arena)
         self.last_stt: dict[str, Any] = {}
         self.selftest: dict[str, Any] = {}
 
@@ -450,10 +460,11 @@ def load_speaker(config: Any, device_id: int) -> Speaker:
     import onnxruntime as ort
 
     from speechforge import models
-    from speechforge.engines import base
+    from speechforge.engines import arena, base
     from speechforge.engines.turn import EnergyVad, SileroVad, SmartTurn
 
     models.verify_for_load(config)
+    shared = False
     if config.gpu.provider == "cuda":
         preload = getattr(ort, "preload_dlls", None)
         if callable(preload):
@@ -465,6 +476,8 @@ def load_speaker(config: Any, device_id: int) -> Speaker:
                 "extra (onnxruntime-gpu), not onnxruntime"
             )
         check_card_name(device_id, config.gpu.expect_name)
+        # Before the first session: the one arena every session then shares (S24).
+        shared = arena.ensure_shared_arena(config.gpu, device_id)
     base.builtin()
     try:
         tts_loader = base.TTS_ENGINES[config.tts.engine]
@@ -483,6 +496,7 @@ def load_speaker(config: Any, device_id: int) -> Speaker:
                 models.path_of(config, "smart-turn"),
                 provider=config.gpu.provider,
                 device_id=device_id,
+                shared_arena=shared,
             )
             parts.append(eou)
         vad_path = models.path_of(config, "silero-vad")
@@ -492,7 +506,7 @@ def load_speaker(config: Any, device_id: int) -> Speaker:
             with contextlib.suppress(Exception):
                 part.close()
         raise
-    return Speaker(tts, stt, eou=eou, vad=vad)
+    return Speaker(tts, stt, eou=eou, vad=vad, shared_arena=shared)
 
 
 def check_card_name(device_id: int, expect: str) -> None:

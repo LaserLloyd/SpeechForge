@@ -22,7 +22,7 @@ StudioForge unreachable and the card not clearly free), `gpu_vacated`, `load_fai
 | Route | Auth | What |
 | --- | --- | --- |
 | `GET /health` | none | `{"ok": true, "version", "api": 1}` (+ `"crashloop": true`); while the supervisor is in a crash loop it answers `{"ok": false, "state": "crashloop"}` itself |
-| `GET /ready` | token | 200 when the models are loaded and self-tested, else 503 + `Retry-After`; body: state, device, gpu (name, sm), lease, sessions, counters, `selftest`, `engines`, `engine_shas`, `load_ms`, `voices` |
+| `GET /ready` | token | 200 when the models are loaded and self-tested, else 503 + `Retry-After`; body: state, device, gpu (name, sm, `shared_arena`), lease, sessions, counters, `selftest`, `engines`, `engine_shas`, `load_ms`, `voices` |
 | `GET /metrics` | loopback **and** token | Prometheus text (§9 of the spec): `stt_*`, `eou_*`, `tts_*`, `sessions_open`, `session_errors_total`, `gpu_util`, `vram_used_mib`, `vram_drift_mib`, `gpu_temp_c`, `gpu_power_w`, `lease_state`, `lease_events_total`, `load_ms`, `selftest_pass`. No content ever |
 | `WS /v1/realtime` | token | sf.1 |
 | `POST /v1/audio/transcriptions/raw?sample_rate=16000` | token | raw s16le 16 kHz mono (<= 30 s) -> `{text, audio_ms, cost_ms}` |
