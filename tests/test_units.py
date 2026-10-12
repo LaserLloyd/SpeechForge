@@ -263,6 +263,33 @@ def test_rolling_stt_gaps_and_overlaps():
     assert s.end == 960
 
 
+def test_rolling_stt_first_frame_after_reset_adopts_pts_without_zero_fill():
+    # A detach resets the stream while the client's mic clock keeps running; the
+    # first frame of the resume must become the clock origin, not be preceded by
+    # up to MAX_GAP_FILL_S of zero-filled silence.
+    s = RollingStt(vad=EnergyVad().stream())
+    s.push(0, _speech(320))
+    s.reset_all()
+    pts = 3 * RATE  # inside the 5 s fill bound: the old code zero-filled 3 s
+    s.push(pts, _speech(320))
+    assert s.end - s._buf_start == 320 and s._buf_start == pts
+    assert s.end == pts + 320 and s.expected == pts + 320
+    assert s.utt_start == s.tail_start == pts and s._fed == pts
+    assert s._vad_pos >= pts  # the VAD clock follows the mic clock
+    assert not s.partial_due(now=10.0) and s.take_partial(now=10.0).tail_start == pts
+    s.push(pts + 320, _speech(320))  # contiguous afterwards
+    assert s.end - s._buf_start == 640
+
+
+def test_rolling_stt_small_gap_fill_still_works_after_the_first_frame():
+    s = RollingStt(vad=EnergyVad().stream())
+    s.reset_all()
+    s.push(1000, _speech(320))
+    assert s._buf_start == 1000
+    s.push(1000 + 320 + 640, _speech(320))  # 640 missing: zero-filled
+    assert s.end - s._buf_start == 320 + 640 + 320
+
+
 def test_stable_words_rule():
     s = RollingStt(vad=EnergyVad().stream(), clock=lambda: 0.0)
     for i in range(0, RATE, 320):

@@ -115,6 +115,7 @@ class RollingStt:
     # ------------------------------------------------------------------ state
     def reset_all(self) -> None:
         self.expected = 0  # next mic sample index we expect (session clock)
+        self._fresh = True  # no audio since a (re)set: the next frame's pts is the clock origin
         self._chunks: list[np.ndarray] = []
         self._buf_start = 0  # mic index of the first buffered sample
         self._buf_len = 0
@@ -198,7 +199,13 @@ class RollingStt:
         """One mic frame. Returns wire events (``stt.vad``) and internal
         triggers (``{"type": "_pause", "at", "pause_ms"}``)."""
         x = pcm16.astype(np.float32) / 32768.0
-        if pts > self.expected:  # a gap: zero-fill (bounded), keep the clock honest
+        if self._fresh:
+            # First frame after a (re)set -- a new session or a resume after a detach. The
+            # client's mic clock kept running meanwhile, so adopt its pts as the origin
+            # instead of zero-filling up to MAX_GAP_FILL_S of silence from sample 0.
+            self.expected = self._buf_start = self.utt_start = self.tail_start = pts
+            self._vad_pos = self._fed = pts
+        elif pts > self.expected:  # a gap: zero-fill (bounded), keep the clock honest
             gap = pts - self.expected
             if gap > MAX_GAP_FILL_S * RATE:
                 self.reset_all()
@@ -211,6 +218,7 @@ class RollingStt:
             if skip >= len(x):
                 return []
             x = x[skip:]
+        self._fresh = False
         self._chunks.append(x)
         self._buf_len += len(x)
         self.expected = self.end
