@@ -188,7 +188,7 @@ offset size  field
 | `tts.text` | `ctx`, `text`, `final:bool` | append text. Phase 1 renders per clause/sentence as the box's splitter emits them; phase 2 engines that accept token streams take smaller deltas |
 | `tts.flush` | `ctx`, `id` | render everything buffered now → `tts.flushed{id}` |
 | `tts.close` | `ctx` | no more text; the rig emits `tts.done` when the audio is out |
-| `cancel` | `gen` or `ctx` | **idempotent.** Stop every ctx with `gen < given` (or that ctx), drop queued audio and text, answer `cancelled{gen, stop_ms}`. GPU work for it ends within one decode step (≤ 50 ms) |
+| `cancel` | `gen` or `ctx` | **idempotent.** Stop every ctx with `gen <= given` (the given generation and every older one), or that ctx, drop queued audio and text, answer `cancelled{gen, stop_ms}`. GPU work for it ends within one decode step (≤ 50 ms) |
 | `credit` | `ctx`, `ahead_ms` | how much unplayed audio the box will accept beyond what the phone has played (default 3000). The rig pauses LM/decoder work past it. This is the backpressure, and it bounds wasted GPU on an interrupt |
 | `voice.put` / `voice.has` / `voice.delete` | `id`, payload (conditionals) | same semantics as the HTTP routes; usually done out of band |
 | `ping` | `t` | every 250 ms; also carries `box_load` |
@@ -213,7 +213,7 @@ offset size  field
 
 **Keepalive and liveness.** Pings run every 250 ms. The box declares the rig dead after **3 missed pongs, or 1 s**, or after partial lag over 800 ms for 1 s, and fails over (§6). The rig closes a session after 30 s without any frame.
 
-**Resume.** The rig keeps **no conversational state worth resuming**: every utterance and reply can be recreated from the box's ring buffer and splitter. `resume` only re-attaches within 10 s, keeping the same lease and warm caches. After a reconnect the box re-sends audio from the last `stt.final.upto` (the box keeps a 10 s mic ring) and re-opens TTS from the first unplayed sentence (v3 already tracks `after_partial`). That design choice removes a whole class of split-brain bugs.
+**Resume.** The rig keeps **no conversational state worth resuming**: every utterance and reply can be recreated from the box's ring buffer and splitter. `resume` only re-attaches within 10 s, keeping the same lease and warm caches. After a reconnect the box does not replay anything to the rig: it moves the open utterance or reply to its CPU path and re-attaches the socket, and the mic clock simply continues. That design choice removes a whole class of split-brain bugs.
 
 **Versioning.** `sf.1` is frozen once shipped. Additive fields are allowed; a meaning change is `sf.2`, offered alongside. The add-on pins `sf.1` in a contract test; the rig rejects unknown frame types with `error{bad_frame}` and never closes the session for them.
 
