@@ -42,3 +42,40 @@ The four Chatterbox speech-encoder tensors as an `.npz` -- `cond_emb` (1, N, 102
 or the encoder's own names (`audio_features`, `audio_tokens`). Loaded with
 `allow_pickle=False`, zip-size-checked, shape/dtype/range/finite validated. Stored in
 `voices.dir` (Windows default `%LOCALAPPDATA%\SpeechForge\voices`, user-only ACL, not indexed).
+
+## Reference clips (`POST /v1/voices/from-reference`)
+
+Off unless `voices.allow_reference_clip: true` (decision D3: the clip stays on the box). Body: a
+16-bit PCM WAV, any rate, mono or stereo (averaged). The server cleans the clip itself before
+the speech encoder sees it (decision S30); `voices.prepare_reference: false` skips steps 2-4.
+
+1. Resample to 24 kHz with a band-limited polyphase filter (about 90 dB of alias rejection).
+2. Remove the DC offset.
+3. Trim leading and trailing silence: 20 ms frames, a frame is silent when its RMS is more than
+   40 dB under the clip's loudest frame; 50 ms is kept either side. Pauses inside the clip stay.
+4. Apply one gain so the speech sits at `voices.reference_target_dbfs` RMS (default -20, range
+   -30..-10), never past a -1 dBFS peak (a clip with big transients is peak-limited instead).
+
+Nothing else: no noise reduction, no gate inside speech, no compression, no cut to a fixed length.
+The 3-30 s limit applies to the trimmed clip (`400 bad_audio` otherwise).
+
+`201` returns `{"id": "sha256:...", "clip": {...}}`:
+
+| `clip` field | Meaning |
+|---|---|
+| `duration_s` | length of what the encoder was given |
+| `trimmed_lead_ms`, `trimmed_tail_ms` | silence removed (margin already kept) |
+| `gain_db` | gain applied (negative for a hot clip) |
+| `peak_dbfs_in`, `rms_dbfs_in` | level of the upload (peak: whole clip; RMS: the speech after trimming) |
+| `clipped_samples` | samples at full scale in the upload |
+| `prepared` | `false` when `voices.prepare_reference` is off (only `duration_s` and `prepared` are then present) |
+| `warnings` | list of `{code, message}`; the voice is built anyway |
+
+Warning codes: `short_clip` (under 3 s of speech after trimming), `quiet_clip` (speech under
+-35 dBFS: too far from the mic, or noisy), `clipping` (3 or more samples at full scale),
+`long_lead_silence` (more than 500 ms trimmed from the start), `silent_clip`.
+
+A good clip: 6-15 s of clean, continuous speech by one speaker in the voice and style you want to
+hear, starting right at the first word, no music or background voices, recorded at 24 kHz or
+above (a lower rate caps the top of the voice). The encoder reads the clip as it is: room, noise
+and delivery all become part of the voice.

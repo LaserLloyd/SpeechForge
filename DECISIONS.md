@@ -486,3 +486,31 @@ voice client treats `unleased` as serviceable on the assumption that the server 
 such a load; this makes that true instead of hopeful. The cost is a bounded delay (one retry
 interval after StudioForge returns) and, when StudioForge refuses, a reload for the voice client's
 CPU fallback window; both are cheaper than holding a card another tenant has been promised.
+
+## S30 -- The server cleans a reference clip before the encoder sees it
+
+**Decision.** `POST /v1/voices/from-reference` (and the CPU bench voice) now run the upload
+through `audio.reference_clip`: a band-limited polyphase resample to 24 kHz
+(`resample_poly`, Kaiser-windowed sinc, cutoff at the lower Nyquist, about 90 dB of alias
+rejection; `resample_linear` stays on the realtime paths), then `prepare_reference`: DC removal,
+leading/trailing silence trimmed by a 20 ms short-time RMS gate 40 dB under the clip's own
+loudest frame (50 ms margin kept), and one gain to -20 dBFS RMS capped so the peak never passes
+-1 dBFS. The 3-30 s check applies to the trimmed clip. The response carries a `clip` object
+(trim, gain, levels, `warnings`: `short_clip`, `quiet_clip`, `clipping`, `long_lead_silence`,
+`silent_clip`). `voices.prepare_reference` (default true) turns the cleaning off (the resample
+stays); `voices.reference_target_dbfs` (default -20, range -30..-10) sets the level.
+`ChatterboxTts.build_voice` still takes raw audio and, at another rate, resamples with
+`resample_poly`; the route prepares, the engine does not.
+
+**Why.** A cloned voice is the encoder's view of the clip. A lead-in of room tone, a DC offset,
+a level far from the training range or a 48 kHz recording folded down by an aliasing resampler
+all land in the conditioning, and the owner hears them as uneven cadence and blips in every
+sentence afterwards. Cleaning is cheap, deterministic and identical for every client, so it
+belongs on the server rather than in whatever uploads the clip. Warnings tell the owner what to
+re-record instead of silently shipping a bad voice.
+Not done, on purpose: noise reduction and a gate inside speech (either alters the timbre the
+encoder is reading, and a clean recording does not need them); compression or limiting beyond
+the peak cap (the gain is a pure scale, so the dynamics are the speaker's); cutting to a fixed
+length (the engine knows what it uses; Qwen3 and dots cut their own); loudness (LUFS)
+weighting or spectral EQ (no evidence they help, and they cannot be undone); refusing a clip on
+a warning (the voice is still built, and the 3-30 s limit is the only hard gate).

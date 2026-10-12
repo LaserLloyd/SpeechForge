@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from speechforge.app import create_app
-from speechforge.audio import wav_bytes
+from speechforge.audio import float_to_pcm16, wav_bytes
 from speechforge.lease import LeaseClient
 from speechforge.pipeline import Speaker
 from tests.conftest import FakeStt, FakeTts
@@ -337,6 +337,66 @@ async def test_voice_from_reference_when_allowed(config, studioforge, env_token)
         assert vid in (await c.get("/v1/voices")).json()["ids"]
         short = wav_bytes(np.zeros(24000, "<i2"), 24000)
         assert (await c.post("/v1/voices/from-reference", content=short)).status_code == 400
+
+
+class RecordingTts(FakeTts):
+    def __init__(self):
+        super().__init__()
+        self.seen: list[tuple[np.ndarray, int]] = []
+
+    def build_voice(self, reference, rate):
+        self.seen.append((np.array(reference), rate))
+        return super().build_voice(reference, rate)
+
+
+async def test_voice_from_reference_prepares_the_clip_and_reports_it(
+    config, studioforge, env_token
+):
+    config.voices.allow_reference_clip = True
+    tts = RecordingTts()
+    app, *_ = await build(config, studioforge, tts=tts)
+    seen = tts.seen
+    t = np.arange(24000 * 4) / 24000
+    speech = (0.05 * np.sin(2 * np.pi * 200 * t) * (0.7 + 0.3 * np.sin(2 * np.pi * 3 * t))).astype(
+        np.float32
+    )
+    pcm = np.concatenate([np.zeros(24000 * 2, np.float32), speech, np.zeros(24000, np.float32)])
+    clip = wav_bytes(float_to_pcm16(pcm + 0.02), 24000)  # quiet, with a DC offset
+    async with Running(app) as c:
+        await ready(c)
+        r = await c.post("/v1/voices/from-reference", content=clip)
+        assert r.status_code == 201
+        info = r.json()["clip"]
+        assert info["prepared"] is True and info["gain_db"] > 0
+        assert 1900 <= info["trimmed_lead_ms"] <= 1960 and 900 <= info["trimmed_tail_ms"] <= 960
+        assert [w["code"] for w in info["warnings"]] == ["long_lead_silence"]
+        audio, rate = seen[-1]
+        assert rate == 24000 and abs(len(audio) / 24000 - 4.1) < 0.06
+        assert abs(float(audio.mean())) < 0.01 and abs(float(np.sqrt(np.mean(audio**2)))) > 0.08
+        # 3 s of audio that is 1.5 s of speech is too short once trimmed
+        short = np.concatenate(
+            [np.zeros(24000, np.float32), speech[:36000], np.zeros(24000, np.float32)]
+        )
+        r = await c.post(
+            "/v1/voices/from-reference", content=wav_bytes(float_to_pcm16(short), 24000)
+        )
+        assert r.status_code == 400 and "after trimming" in r.json()["error"]["message"]
+
+
+async def test_voice_from_reference_prepare_switch_off_passes_raw(config, studioforge, env_token):
+    config.voices.allow_reference_clip = True
+    config.voices.prepare_reference = False
+    tts = RecordingTts()
+    app, *_ = await build(config, studioforge, tts=tts)
+    seen = tts.seen
+    pcm = np.concatenate([np.zeros(24000, np.float32), np.full(24000 * 3, 0.01, np.float32)])
+    pcm16 = float_to_pcm16(pcm)
+    async with Running(app) as c:
+        await ready(c)
+        r = await c.post("/v1/voices/from-reference", content=wav_bytes(pcm16, 24000))
+        assert r.status_code == 201
+        assert r.json()["clip"] == {"duration_s": 4.0, "prepared": False}
+        assert np.allclose(seen[-1][0], pcm16.astype(np.float32) / 32767.0, atol=1e-4)
 
 
 async def test_voice_put_size_cap(config, studioforge, env_token):

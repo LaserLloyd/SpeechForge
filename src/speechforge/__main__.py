@@ -416,7 +416,7 @@ def _bench_voice(args: argparse.Namespace) -> bytes:
     from speechforge.selftest import golden_clip
 
     clip, rate = golden_clip()
-    from speechforge.audio import resample_linear
+    from speechforge.audio import reference_clip
 
     eng = ChatterboxEngine(
         Path(args.cpu_voice) / "chatterbox-turbo",
@@ -424,7 +424,8 @@ def _bench_voice(args: argparse.Namespace) -> bytes:
         provider="cpu",
         cpu_threads=2,
     )
-    return eng.build_voice(resample_linear(clip, rate, 24000)).to_npz()
+    prepared, _ = reference_clip(clip, rate)
+    return eng.build_voice(prepared).to_npz()
 
 
 def cmd_bench(args: argparse.Namespace) -> int:

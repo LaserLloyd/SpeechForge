@@ -291,6 +291,11 @@ class VoicesConfig(_Section):
     #: D3: the reference clip stays on the box. True enables
     #: POST /v1/voices/from-reference (the owner's decision only).
     allow_reference_clip: bool = False
+    #: S30: clean the reference clip on the server before the encoder sees it
+    #: (DC removal, silence trim, level normalisation). Off = the resampled samples as sent.
+    prepare_reference: bool = True
+    #: RMS level the prepared clip is normalised to (peak-limited to -1 dBFS).
+    reference_target_dbfs: float = Field(-20.0, ge=-30.0, le=-10.0)
 
 
 class SelftestConfig(_Section):
