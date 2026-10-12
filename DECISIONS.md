@@ -405,3 +405,21 @@ models unload -- which is exactly when a lease-returning tenant (S3) must give t
 **Default `gpu.shared_arena: false`**; the code stays behind the flag for a deployment that never
 unloads (or that exits the process to unload). The cold-load answer remains the Open list in
 docs/BENCHMARKS.md.
+
+## S29 -- An unleased server asks for the lease again, and gives way when refused
+
+**Decision.** A server that loaded without a lease because StudioForge was unreachable
+(`on_unreachable: proceed_if_free`) retries the lease every `studioforge.relink_s` (default 30 s,
+5-600) from `Residency.tick()`, on the card it is loaded on, with the same class-2 claim and vacate
+callback as at load. Granted: it holds the lease from then on (`state{lease:"held"}`, touched like
+any other). Refused: it gives way the way a vacate does (`vacating`, bounded drain, unload with
+`gpu_vacated`, the vacate cooldown), no lease id or token needed. Still unreachable: nothing
+changes and the next try is `relink_s` later. A stale lease under our own holder is released
+before a refusal is believed. `lease_mode: off` never retries and never gives way.
+
+**Why.** An unleased server was invisible to StudioForge, so a vacate request could never reach it
+and a priority-1 load had to wait for our idle unload or fail against a card we still held. The
+voice client treats `unleased` as serviceable on the assumption that the server still gives way to
+such a load; this makes that true instead of hopeful. The cost is a bounded delay (one retry
+interval after StudioForge returns) and, when StudioForge refuses, a reload for the voice client's
+CPU fallback window; both are cheaper than holding a card another tenant has been promised.

@@ -132,12 +132,18 @@ A `credit` for an unknown or finished ctx is ignored.
 * `unleased` -- the models are loaded **without** a lease, either because StudioForge was
   unreachable at load time and NVML showed a clearly free card (`on_unreachable:
   proceed_if_free`: at least `unreachable_min_free_gib` free and no llama-server holding memory
-  there), or because `lease_mode` is `off`. It is fully serviceable. The rig does **not** try to
-  lease later while the models stay loaded (touches are skipped without a lease), so an unleased
-  server keeps the card until it unloads (idle or restart) and takes a lease at the next load.
-  Because nothing was registered with StudioForge, an unleased server does **not** give way to a
-  higher-priority StudioForge load: no vacate callback reaches it, so no `vacating` and no
-  `vacated`.
+  there), or because `lease_mode` is `off`. It is fully serviceable.
+  * Unreachable at load: the rig asks StudioForge for the lease again every
+    `studioforge.relink_s` (default 30 s) while the models stay loaded. When it is granted the
+    rig sends `state{lease:"held"}` and from then on behaves as `held` above. When StudioForge
+    is back but refuses (the card is committed to a higher-priority load) the rig gives way
+    exactly as for a vacate: `state{lease:"vacating", deadline_s}`, the open contexts finish
+    (bounded), new `tts.open` is refused with `vacated`, then every session gets the fatal
+    `vacated` error and a 1001 close. While StudioForge stays unreachable nothing changes.
+    So this kind of `unleased` still gives way to a priority-1 load, at most about one retry
+    interval after StudioForge is reachable.
+  * `lease_mode: off`: there is no StudioForge to ask. The rig never leases and never gives way;
+    it keeps the card until it unloads (idle or restart).
 * `vacating`, `lost` -- as above, transient.
 * `none` -- only on the early `state` frame while the models are still loading.
 
