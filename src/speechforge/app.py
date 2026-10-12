@@ -49,6 +49,7 @@ from speechforge.audio import (
     TTS_SAMPLE_RATE,
     pcm16_to_float,
     read_wav,
+    reference_clip,
     resample_linear,
     streaming_wav_header,
     wav_bytes,
@@ -471,9 +472,11 @@ def create_app(
 
     @app.post("/v1/voices/from-reference")
     async def voice_from_reference(request: Request) -> JSONResponse:
-        """Body: a 16-bit WAV reference clip (3-30 s). Built with this server's
-        own speech encoder; returns the id to speak with. Off by default: the
-        reference clip stays on the box (decision D3)."""
+        """Body: a 16-bit WAV reference clip (3-30 s after trimming). Cleaned on the
+        server (band-limited resample to 24 kHz, DC removal, silence trim, level
+        normalisation: S30), built with this server's own speech encoder; returns the
+        id to speak with and a ``clip`` object (what was done, and any quality
+        warnings). Off by default: the reference clip stays on the box (decision D3)."""
         authorize(request)
         if not config.voices.allow_reference_clip:
             raise Forbidden(
@@ -483,16 +486,26 @@ def create_app(
             )
         data = await read_body(request, max_body)
         audio, rate = read_wav(data)
-        if rate != TTS_SAMPLE_RATE:
-            audio = resample_linear(audio, rate, TTS_SAMPLE_RATE)
+        audio, clip = await asyncio.to_thread(
+            reference_clip,
+            audio,
+            rate,
+            prepare=config.voices.prepare_reference,
+            target_dbfs=config.voices.reference_target_dbfs,
+        )
         seconds = len(audio) / TTS_SAMPLE_RATE
         if not 3.0 <= seconds <= 30.0:
-            raise BadRequest(f"reference clip is {seconds:.1f} s; use 3-30 s", code="bad_audio")
+            raise BadRequest(
+                f"reference clip is {seconds:.1f} s"
+                + (" after trimming silence" if clip.get("prepared") else "")
+                + "; use 3-30 s",
+                code="bad_audio",
+            )
         speaker = residency.require()
         async with residency.use():
             data = await asyncio.to_thread(speaker.build_voice, audio, TTS_SAMPLE_RATE)
         vid = await asyncio.to_thread(voices.put_bytes, data)
-        return JSONResponse({"id": f"sha256:{vid}"}, status_code=201)
+        return JSONResponse({"id": f"sha256:{vid}", "clip": clip}, status_code=201)
 
     # ------------------------------------------------------------ vacate (D56)
     @app.post("/internal/vacate")

@@ -118,6 +118,8 @@ voices:
   max_bytes: 2097152
   max_files: 256
   allow_reference_clip: false   # D3: reference clips stay on the box
+  prepare_reference: true       # S30: DC removal, silence trim, level normalisation of the clip
+  reference_target_dbfs: -20.0  # RMS target of the prepared clip (-30..-10), peak-limited to -1 dBFS
 
 selftest:
   enabled: true

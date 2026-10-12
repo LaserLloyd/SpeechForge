@@ -678,3 +678,155 @@ def test_wer():
     assert wer("the cat sat", "the cat sat") == 0
     assert wer("the cat sat", "the dog sat") == pytest.approx(1 / 3)
     assert wer("a b", "") == 1.0
+
+
+# --------------------------------------------------------------- reference clip (S30)
+
+
+def _sine(freq: float, rate: int, seconds: float = 1.0, amp: float = 0.5) -> np.ndarray:
+    t = np.arange(int(rate * seconds)) / rate
+    return (amp * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+
+def _bin_amp(x: np.ndarray, rate: int, freq: float) -> float:
+    """Amplitude of ``freq`` in ``x`` (Hann-windowed FFT, centre of the clip)."""
+    mid = x[len(x) // 4 : -len(x) // 4]
+    w = np.hanning(len(mid))
+    spec = np.abs(np.fft.rfft(mid * w)) / (w.sum() / 2)
+    k = int(round(freq * len(mid) / rate))
+    return float(spec[k - 2 : k + 3].max())
+
+
+@pytest.mark.parametrize("src", [48000, 44100, 22050, 16000])
+def test_resample_poly_keeps_frequency_and_amplitude(src):
+    from speechforge.audio import resample_poly
+
+    y = resample_poly(_sine(1000.0, src, 1.0), src, 24000)
+    assert abs(len(y) - 24000) <= 1
+    assert abs(_bin_amp(y, 24000, 1000.0) - 0.5) / 0.5 < 0.01
+    # the peak of the spectrum is at 1 kHz, not somewhere else
+    mid = y[len(y) // 4 : -len(y) // 4]
+    assert (
+        abs(np.argmax(np.abs(np.fft.rfft(mid * np.hanning(len(mid))))) * 24000 / len(mid) - 1000)
+        < 5
+    )
+
+
+def test_resample_poly_rejects_aliases_that_linear_lets_in():
+    from speechforge.audio import resample_linear, resample_poly
+
+    # 13.5 kHz is above the 12 kHz Nyquist of 24 kHz and folds to 10.5 kHz
+    x = _sine(13500.0, 48000, 1.0)
+    lin = _bin_amp(resample_linear(x, 48000, 24000), 24000, 10500.0)
+    poly = _bin_amp(resample_poly(x, 48000, 24000), 24000, 10500.0)
+    assert 20 * np.log10(lin / poly) >= 40.0
+    assert 20 * np.log10(poly / 0.5) <= -40.0
+    # and a 15 kHz tone (folds to 9 kHz), through the non-integer ratio too
+    for src in (48000, 44100):
+        y = resample_poly(_sine(15000.0, src, 1.0), src, 24000)
+        assert 20 * np.log10(max(np.max(np.abs(y[2000:-2000])), 1e-12) / 0.5) <= -40.0
+
+
+def test_resample_poly_edges_and_noops():
+    from speechforge.audio import resample_poly
+
+    x = np.full(4800, 0.25, np.float32)
+    y = resample_poly(x, 48000, 24000)
+    assert np.allclose(y, 0.25, atol=1e-3)  # a DC level does not ring at the ends
+    assert resample_poly(x, 24000, 24000) is x or np.array_equal(resample_poly(x, 24000, 24000), x)
+    assert len(resample_poly(np.zeros(0, np.float32), 44100, 24000)) == 0
+    assert len(resample_poly(np.ones(5, np.float32), 44100, 24000)) >= 1
+
+
+def _voiced(seconds: float, amp: float = 0.2, rate: int = 24000) -> np.ndarray:
+    return _sine(220.0, rate, seconds, amp) * (0.6 + 0.4 * _sine(3.0, rate, seconds, 1.0))
+
+
+def _db_of(x: np.ndarray) -> tuple[float, float]:
+    rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+    return 20 * np.log10(rms), 20 * np.log10(float(np.max(np.abs(x))))
+
+
+def test_prepare_reference_trims_silence_and_normalises():
+    from speechforge.audio import prepare_reference
+
+    rng = np.random.default_rng(1)
+    hush = lambda s: (0.0005 * rng.standard_normal(int(24000 * s))).astype(np.float32)  # noqa: E731
+    clip = np.concatenate([hush(1.0), _voiced(4.0), hush(0.7)])
+    out, st = prepare_reference(clip)
+    # 1.0 s lead and 0.7 s tail go, less the 50 ms margin each
+    assert 900 <= st["trimmed_lead_ms"] <= 960
+    assert 600 <= st["trimmed_tail_ms"] <= 660
+    assert abs(len(out) / 24000 - 4.1) < 0.06 and st["duration_s"] == round(len(out) / 24000, 3)
+    rms_db, peak_db = _db_of(out)
+    assert abs(rms_db - (-20.0)) < 0.2 and peak_db <= -1.0 + 0.05
+    assert st["rms_dbfs_in"] < -20.0 and st["gain_db"] > 0
+    assert out.dtype == np.float32
+    # the signal inside is the input's, scaled: no gate, no reshaping
+    k = int(0.05 * 24000)
+    a = clip[24000 - k : 24000 - k + len(out)]
+    assert np.allclose(
+        out / np.max(np.abs(out)), (a - a.mean()) / np.max(np.abs(a - a.mean())), atol=0.02
+    )
+    assert [w["code"] for w in st["warnings"]] == ["long_lead_silence"]
+
+
+def test_prepare_reference_gain_is_capped_by_peak():
+    from speechforge.audio import prepare_reference
+
+    x = _voiced(4.0, amp=0.02)
+    x[24000] = 0.3  # one transient: RMS-matching to -20 would put it far over full scale
+    out, st = prepare_reference(x)
+    rms_db, peak_db = _db_of(out)
+    assert abs(peak_db - (-1.0)) < 0.05 and rms_db < -20.0
+    assert abs(st["gain_db"] - (-1.0 - 20 * np.log10(0.3))) < 0.3
+    assert np.max(np.abs(out)) < 1.0
+
+
+def test_prepare_reference_attenuates_hot_clips_and_removes_dc():
+    from speechforge.audio import prepare_reference
+
+    x = _voiced(4.0, amp=0.5) + 0.1  # loud and offset
+    out, st = prepare_reference(x)
+    assert abs(float(out.mean())) < 1e-3 * float(np.max(np.abs(out)))
+    assert st["gain_db"] < 0 and abs(_db_of(out)[0] + 20.0) < 0.2
+    kept, st2 = prepare_reference(x, dc=False)
+    assert abs(float(kept.mean())) > 1e-3
+    assert st2["peak_dbfs_in"] == st["peak_dbfs_in"]
+
+
+def test_prepare_reference_warnings():
+    from speechforge.audio import prepare_reference
+
+    codes = lambda x, **kw: [w["code"] for w in prepare_reference(x, **kw)[1]["warnings"]]  # noqa: E731
+    assert codes(_voiced(4.0)) == []
+    assert "short_clip" in codes(_voiced(2.0))
+    assert "quiet_clip" in codes(_voiced(4.0, amp=0.004))
+    loud = _voiced(4.0)
+    loud[100:104] = 1.0
+    assert "clipping" in codes(loud)
+    loud[100:102] = 0.2
+    assert "clipping" not in codes(loud)  # only two samples left at full scale
+    assert codes(np.zeros(24000 * 4, np.float32)) == ["silent_clip"]
+    assert codes(np.zeros(0, np.float32)) == ["silent_clip"]
+    # a caller that counted clipped samples at the original rate can say so
+    assert "clipping" in codes(_voiced(4.0), clipped_samples=5)
+    lead = np.concatenate([np.zeros(24000, np.float32), _voiced(4.0)])
+    out, st = prepare_reference(lead)
+    assert st["trimmed_lead_ms"] > 500 and "long_lead_silence" in [
+        w["code"] for w in st["warnings"]
+    ]
+
+
+def test_reference_clip_helper_resamples_then_prepares():
+    from speechforge.audio import reference_clip
+
+    x = np.concatenate([np.zeros(48000, np.float32), _voiced(5.0, rate=48000)])
+    y, st = reference_clip(x, 48000)
+    assert st["prepared"] is True and abs(len(y) / 24000 - 5.1) < 0.1
+    raw, st2 = reference_clip(x, 48000, prepare=False)
+    assert st2 == {"duration_s": round(len(raw) / 24000, 3), "prepared": False}
+    assert abs(len(raw) / 24000 - 6.0) < 0.01
+    assert Config(data_dir=".").voices.prepare_reference is True
+    with pytest.raises(ValueError):
+        Config(data_dir=".", voices={"reference_target_dbfs": -5})

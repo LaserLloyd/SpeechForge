@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from speechforge.audio import TTS_SAMPLE_RATE, float_to_pcm16, resample_linear
+from speechforge.audio import TTS_SAMPLE_RATE, float_to_pcm16, resample_poly
 from speechforge.engines.chatterbox import ChatterboxEngine, slice_prompt
 from speechforge.pipeline import ChunkPlanConfig, pipelined
 from speechforge.voices import VoiceTensors, parse_npz
@@ -49,7 +49,7 @@ class ChatterboxTts:
 
     def build_voice(self, reference: np.ndarray, rate: int) -> bytes:
         if rate != TTS_SAMPLE_RATE:
-            reference = resample_linear(reference, rate, TTS_SAMPLE_RATE)
+            reference = resample_poly(reference, rate, TTS_SAMPLE_RATE)
         return self.engine.build_voice(np.asarray(reference, np.float32)).to_npz()
 
     def _prepare(self, vid: str, voice: VoiceTensors) -> tuple[VoiceTensors, Any]:
