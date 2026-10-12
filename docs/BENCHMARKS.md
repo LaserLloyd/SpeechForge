@@ -474,3 +474,8 @@ Readings:
 Live bench after the restart that evening (`speechforge bench -n 10` with the owner's profile,
 before S31): TTFA p50 191 / p90 392 ms, RTF p50 0.25, cancel p99 8.8 ms, partial lag p90 94 ms,
 round-trip WER 2.5 %, end-of-turn 690 ms (the S26 floor).
+
+After S31 went live (10 s prompt, sentence units; three `bench -n 10` runs with warm shapes):
+TTFA p50 201-203 ms (the longer decoder prompt costs about 10 ms on the 3090), p90 205-511 ms
+(run-to-run; the server-side `tts_ttfa_ms` histogram over 90 contexts puts p50 under 250 ms),
+RTF p50 0.24-0.26, cancel p99 7 ms, partial lag p90 94 ms, round-trip WER 2.5 %.
