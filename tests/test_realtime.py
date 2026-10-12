@@ -199,8 +199,15 @@ def test_refused_lease_is_a_pre_upgrade_503_after_first_try(config, studioforge)
 
 
 # --------------------------------------------------------------------- STT
+class SentenceStt(FakeStt):
+    """Partials end a sentence, so the short silence floor applies."""
+
+    def transcribe(self, audio):
+        return super().transcribe(audio) + "."
+
+
 def test_partials_eou_final_and_reset(config, studioforge):
-    app, _, stt, eou = build(config, studioforge)
+    app, _, stt, eou = build(config, studioforge, stt=SentenceStt())
     with TestClient(app) as tc, connect(tc) as ws:
         hello(ws)
         for f in speech(1.0):
@@ -215,7 +222,7 @@ def test_partials_eou_final_and_reset(config, studioforge):
             ws.send_bytes(f)
             time.sleep(0.016)
         e, _, _ = until(ws, "eou")
-        assert e["p"] == pytest.approx(0.93) and e["pause_ms"] >= 150 and e["at"] <= 16000 + 512
+        assert e["p"] == pytest.approx(0.93) and e["pause_ms"] >= 300 and e["at"] <= 16000 + 512
         ws.send_text(json.dumps({"type": "stt.flush", "id": "f1"}))
         fin, _, _ = until(ws, "stt.final")
         assert fin["id"] == "f1" and fin["text"].startswith("final")
@@ -227,6 +234,33 @@ def test_partials_eou_final_and_reset(config, studioforge):
         pong, _, _ = until(ws, "pong")
         assert pong["t"] == 1.5 and "srv_t" in pong and pong["gpu_util"] == 5
         assert pong["vram_free_mib"] == 18000 and "queue" in pong
+
+
+def test_eou_waits_out_a_mid_sentence_pause_and_ignores_a_low_client_floor(config, studioforge):
+    app, _, _, eou = build(config, studioforge)  # FakeStt partials end without punctuation
+    with TestClient(app) as tc, connect(tc) as ws:
+        hello(ws)
+        ws.send_text(json.dumps({"type": "stt.config", "eou": {"min_pause_ms": 60}}))
+        ws.send_text(json.dumps({"type": "ping", "t": 6}))
+        until(ws, "pong")
+        sess = next(iter(app.state.sessions.sessions.values()))
+        assert sess.stt.min_pause_ms == config.eou.min_silence_ms  # clamped up, not 60
+        for f in speech(1.0):
+            ws.send_bytes(f)
+            time.sleep(0.016)
+        until(ws, "stt.partial")
+        for f in silence(0.6, 16000):  # past the short floor, short of the long one
+            ws.send_bytes(f)
+            time.sleep(0.016)
+        ws.send_text(json.dumps({"type": "ping", "t": 7}))
+        _, _, seen = until(ws, "pong")
+        assert not [m for m in seen if m.get("type") == "eou"]
+        for f in silence(0.4, 16000 + int(0.6 * 16000)):
+            ws.send_bytes(f)
+            time.sleep(0.016)
+        e, _, _ = until(ws, "eou")
+        assert e["pause_ms"] >= config.eou.unpunctuated_silence_ms
+        assert eou.calls == 2  # warm-up + exactly one pause
 
 
 def test_ingest_is_rate_limited(config, studioforge):

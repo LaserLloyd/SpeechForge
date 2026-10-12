@@ -244,6 +244,15 @@ class SttConfig(_Section):
 
 class EouConfig(_Section):
     enabled: bool = True
+    #: Server-owned floor on the silence before Smart Turn is consulted; the client's
+    #: ``eou.min_pause_ms`` can raise the trigger but never lower it. The pause that
+    #: follows a running partial ending in ``. ? !`` is scored once it reaches this.
+    #: Provisional, to be set from the measurement.
+    min_silence_ms: int = Field(300, ge=60, le=3000)
+    #: The longer floor for a pause whose running partial does NOT end a sentence
+    #: (a mid-sentence breath on a long utterance); values below ``min_silence_ms``
+    #: act as ``min_silence_ms``. Provisional, to be set from the measurement.
+    unpunctuated_silence_ms: int = Field(800, ge=60, le=5000)
 
 
 class RealtimeConfig(_Section):
