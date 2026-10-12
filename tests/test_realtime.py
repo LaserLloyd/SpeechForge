@@ -207,6 +207,7 @@ class SentenceStt(FakeStt):
 
 
 def test_partials_eou_final_and_reset(config, studioforge):
+    config.eou.min_silence_ms, config.eou.unpunctuated_silence_ms = 300, 800  # fixed for timing
     app, _, stt, eou = build(config, studioforge, stt=SentenceStt())
     with TestClient(app) as tc, connect(tc) as ws:
         hello(ws)
@@ -237,6 +238,7 @@ def test_partials_eou_final_and_reset(config, studioforge):
 
 
 def test_eou_waits_out_a_mid_sentence_pause_and_ignores_a_low_client_floor(config, studioforge):
+    config.eou.min_silence_ms, config.eou.unpunctuated_silence_ms = 300, 800  # fixed for timing
     app, _, _, eou = build(config, studioforge)  # FakeStt partials end without punctuation
     with TestClient(app) as tc, connect(tc) as ws:
         hello(ws)

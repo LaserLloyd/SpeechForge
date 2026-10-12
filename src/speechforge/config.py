@@ -247,12 +247,14 @@ class EouConfig(_Section):
     #: Server-owned floor on the silence before Smart Turn is consulted; the client's
     #: ``eou.min_pause_ms`` can raise the trigger but never lower it. The pause that
     #: follows a running partial ending in ``. ? !`` is scored once it reaches this.
-    #: Provisional, to be set from the measurement.
-    min_silence_ms: int = Field(300, ge=60, le=3000)
+    #: 700 ms from the 2026-10-12 measurement (docs/BENCHMARKS.md): at the old 150 ms
+    #: every mid-sentence pause scored like an end of turn, and Parakeet punctuates
+    #: nearly every clause boundary, so the silence itself is the lever (S26).
+    min_silence_ms: int = Field(700, ge=60, le=3000)
     #: The longer floor for a pause whose running partial does NOT end a sentence
     #: (a mid-sentence breath on a long utterance); values below ``min_silence_ms``
-    #: act as ``min_silence_ms``. Provisional, to be set from the measurement.
-    unpunctuated_silence_ms: int = Field(800, ge=60, le=5000)
+    #: act as ``min_silence_ms``.
+    unpunctuated_silence_ms: int = Field(1000, ge=60, le=5000)
 
 
 class RealtimeConfig(_Section):

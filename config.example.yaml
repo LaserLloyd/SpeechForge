@@ -90,9 +90,9 @@ stt:
 
 eou:
   enabled: true            # Smart Turn v3.2 GPU, once per pause that reaches the floors below
-  min_silence_ms: 300      # floor the client's min_pause_ms cannot lower (partial ends . ? !)
-  unpunctuated_silence_ms: 800  # longer floor when the partial does not end a sentence
-                           # (both provisional, to be set from the measurement)
+  min_silence_ms: 700      # floor the client's min_pause_ms cannot lower (partial ends . ? !)
+  unpunctuated_silence_ms: 1000  # longer floor when the partial does not end a sentence
+                           # (measured 2026-10-12, docs/BENCHMARKS.md; S26)
 
 realtime:
   max_sessions: 3
