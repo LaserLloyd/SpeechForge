@@ -364,6 +364,61 @@ python scripts/eot_probe.py --summarise run/records.jsonl
 
 ### After
 
-**After (pending):** the post-fix numbers will be filled in here, from the same
-`scripts/eot_probe.py` run and clip set, after the end-of-turn floor and the final
-pre-emption land.
+Same harness, same clip set and reps (75 runs, 90 inserted pauses), against the build with
+the S26 silence floors (`eou.min_silence_ms` 700, `eou.unpunctuated_silence_ms` 1000) and the
+S28 final pre-emption, 17:49 on 2026-10-12, one session, no errors.
+
+#### False end-of-turn at inserted mid-sentence pauses
+
+| utterance | pause ms | pauses | p >= 0.5 | p >= 0.7 | p >= 0.9 | no eou |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 s | 400 | 15 | 0/15 (0%) | 0/15 (0%) | 0/15 (0%) | 15 |
+| 8 s | 700 | 15 | 0/15 (0%) | 0/15 (0%) | 0/15 (0%) | 15 |
+| 8 s | 1000 | 15 | 14/15 (93%) | 12/15 (80%) | 8/15 (53%) | 0 |
+| 15 s | 400 | 15 | 0/15 (0%) | 0/15 (0%) | 0/15 (0%) | 15 |
+| 15 s | 700 | 15 | 1/15 (7%) | 1/15 (7%) | 1/15 (7%) | 14 |
+| 15 s | 1000 | 15 | 9/15 (60%) | 6/15 (40%) | 2/15 (13%) | 0 |
+| all | 400 | 30 | 0/30 (0%) | 0/30 (0%) | 0/30 (0%) | 30 |
+| all | 700 | 30 | 1/30 (3%) | 1/30 (3%) | 1/30 (3%) | 29 |
+| all | 1000 | 30 | 23/30 (77%) | 18/30 (60%) | 10/30 (33%) | 0 |
+| all | all | 90 | 24/90 (27%) | 19/90 (21%) | 11/90 (12%) | 59 |
+
+Before: 73 % / 61 % / 37 % over all 90 pauses. A pause shorter than the floor now produces no
+verdict at all (speech resumes first); a pause that outlasts the floor is scored exactly as
+before, so the 1000 ms rows are unchanged and the floor is what decides. The one 700 ms pause
+that was scored measured just over the floor after VAD rounding.
+
+#### End-of-turn latency (true speech end to first `eou`)
+
+| threshold | utterance | n | miss | p50 ms | p90 ms | max ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| any eou | short | 5 | 0 | 817 | 835 | 840 |
+| any eou | 8 s | 35 | 0 | 793 | 875 | 956 |
+| any eou | 15 s | 35 | 0 | 799 | 854 | 883 |
+| p >= 0.9 | 8 s | 35 | 7 | 791 | 873 | 944 |
+| p >= 0.9 | 15 s | 35 | 27 | 802 | 833 | 838 |
+
+Before: p50 257-270 ms, p90 327-341 ms. The cost of the floor is the floor: about 65 ms to
+stamp the pause start, 700 ms of silence, the Smart Turn call and transport, so a clean end of
+turn is decided about 0.8 s after the last word (p90 0.88 s, max 0.96 s). That is outside the
+SPEC §2 target (p50 <= 350 ms) and inside the brief's bound ("well under a second" is not met,
+"under a second" is). The misses (`p` below threshold at the true end) are the same synthetic
+clips as before; see "`p` by script".
+
+#### `stt.final` cost under continuous partials
+
+| utterance | n | `ms` p50 / p90 / p99 | flush->final wall p50 / p90 / p99 | partials/utt | lag p50 / p90 |
+| --- | --- | --- | --- | --- | --- |
+| 8 s | 35 | 89 / 136 / 155 (was 96 / 168 / 174) | 90 / 137 / 156 | 32 | 79 / 94 |
+| 15 s | 35 | 90 / 139 / 168 (was 97 / 153 / 190) | 92 / 140 / 169 | 64 | 93 / 109 |
+
+The withdrawn partial takes 15-20 ms off the p90 and p99; the median is the decode itself. The
+client's final deadline can be set from the p99: 168 + 10 = about 180 ms, with the 350 ms it
+uses today leaving ample room. Word overlap with the scripts stayed at 96-100 %.
+
+#### What to tune
+
+Both floors are host configuration (`config.yaml` `eou:`). Lowering `min_silence_ms` buys back
+latency one-for-one and lets pauses of that length through again; this clip set only says
+where 400, 700 and 1000 ms land, not where human hesitation sits between them. The add-on's
+false-EOT gate (ADDON-ENGINE §7) should be run against this table before the floor is moved.
