@@ -405,3 +405,18 @@ models unload -- which is exactly when a lease-returning tenant (S3) must give t
 **Default `gpu.shared_arena: false`**; the code stays behind the flag for a deployment that never
 unloads (or that exits the process to unload). The cold-load answer remains the Open list in
 docs/BENCHMARKS.md.
+
+## S27 -- A vacate waits for audio in progress, not for an open context
+
+**Decision.** `TtsContext.producing` is True only while the context has work in hand: a unit
+taken from the queue and not yet fully handled (rendered and flushed), queued units, buffered
+text that a flush or close will cut into a unit, or a close whose `tts.done` is still to be
+sent. `SessionManager.before_unload` waits (bounded by `drain_timeout_s`) only while some
+context is `not done and producing`. An open context with nothing to say no longer holds the
+drain; nothing else about the drain changed (a context still running when the bound expires is
+stopped by the unload path, as before).
+
+**Why.** A voice chat keeps a context open between sentences. Its producer thread polls for the
+next unit, so `done` stayed False and every vacate cost the full 15 s of the bound for nothing,
+while the owner's other tenant waited for the card. The unit is marked busy under the same lock
+that pops it, so there is no instant at which a unit in flight looks idle.

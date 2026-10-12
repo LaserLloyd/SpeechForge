@@ -729,14 +729,15 @@ class SessionManager:
 
     async def before_unload(self, reason: str, timeout_s: float) -> None:
         """Vacate (or any unload with sessions open): stop new contexts, let the
-        current ones finish (bounded), then the residency unloads."""
+        ones that are producing audio finish (bounded), then the residency
+        unloads. A context that is open but idle does not hold the drain."""
         if not self.live():
             return
         self.vacating = True
         await self.on_lease_state("vacating", timeout_s)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and any(
-            not c.done for s in self.live() for c in s.ctxs.values()
+            not c.done and c.producing for s in self.live() for c in s.ctxs.values()
         ):
             await asyncio.sleep(0.05)
 
