@@ -262,6 +262,7 @@ def test_eou_waits_out_a_mid_sentence_pause_and_ignores_a_low_client_floor(confi
         assert e["pause_ms"] >= config.eou.unpunctuated_silence_ms
         assert eou.calls == 2  # warm-up + exactly one pause
 
+
 def test_final_withdraws_a_queued_partial_and_holds_new_ones(config, studioforge):
     import threading
 
