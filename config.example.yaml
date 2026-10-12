@@ -144,3 +144,4 @@ studioforge:
   refusal_cooldown_s: 30
   touch_interval_s: 30
   vacate_cooldown_s: 180
+  relink_s: 30             # unleased server retries the lease this often

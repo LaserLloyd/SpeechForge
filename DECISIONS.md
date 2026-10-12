@@ -460,3 +460,24 @@ unchanged.
 pre-empt one, so on a long utterance with continuous partials the final could sit behind a
 decode that was already queued for audio the final is about to cover anyway. The final is what
 the box waits on; a partial that is stale the moment the flush arrives is worth nothing.
+
+## S29 -- An unleased server asks for the lease again, and gives way when refused
+
+**Decision.** A server that loaded without a lease because StudioForge was unreachable
+(`on_unreachable: proceed_if_free`) retries the lease every `studioforge.relink_s` (default 30 s,
+5-600) from `Residency.tick()`, on the card it is loaded on, with the same class-2 claim and vacate
+callback as at load. Granted: it holds the lease from then on (`state{lease:"held"}`, touched like
+any other). Refused with `lease_conflict` (the card is leased by or promised to an equal or better
+class): it gives way the way a vacate does (`vacating`, bounded drain, unload with `gpu_vacated`,
+the vacate cooldown), no lease id or token needed. Refused with anything else (`lease_vacating`,
+`model_busy`: StudioForge's own transient codes): it keeps serving and asks again. Still
+unreachable: nothing changes and the next try is `relink_s` later. A stale lease under our own
+holder is released before a refusal is believed. `lease_mode: off` never retries and never gives
+way.
+
+**Why.** An unleased server was invisible to StudioForge, so a vacate request could never reach it
+and a priority-1 load had to wait for our idle unload or fail against a card we still held. The
+voice client treats `unleased` as serviceable on the assumption that the server still gives way to
+such a load; this makes that true instead of hopeful. The cost is a bounded delay (one retry
+interval after StudioForge returns) and, when StudioForge refuses, a reload for the voice client's
+CPU fallback window; both are cheaper than holding a card another tenant has been promised.
