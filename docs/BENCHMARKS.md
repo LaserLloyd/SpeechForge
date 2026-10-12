@@ -157,3 +157,213 @@ speechforge bench --url ws://127.0.0.1:1236/v1/realtime --cpu-voice <models dir>
 speechforge bench ... --soak 1800            # the 30-minute two-session soak
 speechforge bench ... --corpus <dir>         # the family corpus (on the box only)
 ```
+
+## End-of-turn and final latency under long utterances (2026-10-12)
+
+**Baseline ("before") numbers for two planned fixes**: an end-of-turn silence floor (do not
+act on an `eou` until the pause has lasted long enough) and pre-empting the final
+(decoding it before `stt.flush` so the flush costs nothing). Everything here is **[M]**,
+measured over `sf.1` on loopback against the live server, with `scripts/eot_probe.py`
+(a pure client: it changes nothing on the server).
+
+### Method
+
+* **Clips.** Windows SAPI speech (`System.Speech`, three voices, 16 kHz mono), clause
+  fragments trimmed and assembled in numpy with digital-zero-plus-noise gaps (about -60 dBFS,
+  a quiet room), so every pause position is known to the sample. Three scripts per length
+  (the "8 s" clips are 6.8-11.2 s long and the "15 s" clips 14.5-19.3 s, counting a 0.6 s
+  lead and the inserted pauses), plus
+  three 2-3 s sanity clips. Each long script exists as: a control with no pause (the clean
+  end of turn), and variants with **one or two mid-sentence pauses of 400, 700 and 1000 ms**
+  that split a clause, so the text before the pause is unpunctuated. Five repetitions
+  of each of the 15 clip classes (the repetition number rotates through the scripts), 75
+  runs, 90 inserted pauses, about 17 minutes.
+* **Run.** One reused session; `stt.config` with defaults (`eou.enabled`, `min_pause_ms:
+  150`, `partial_ms: 160`); the clip streamed in real time (20 ms frames, deadline-paced),
+  1.5 s of silent tail, then `stt.flush` -> `stt.final`. Every `eou`, `stt.partial`,
+  `stt.vad` and the `stt.final` are recorded with arrival times and mic-sample positions,
+  so a policy can be re-scored offline (`scripts/eot_probe.py --summarise`).
+* **Caveat: synthetic speech.** Smart Turn scores prosody. SAPI voices are not human, and
+  they differ among themselves. The first run used question-form endings and Smart Turn gave
+  the true end of the Zira and Mark scripts `p` of about 0.01-0.03 (21 of 35 clips of each
+  length had no `eou >= 0.5` at the true end); the scripts were then reworded as statements
+  and the run repeated, which is the run reported here. Three scripts (the 15 s Zira script
+  and both Mark scripts) still draw a low or erratic `p` at the true end, so read the true-end figures per script
+  (the "by script" table) and read the false-end-of-turn rates as a property of this clip
+  set, not of speakers in general. No claim is made that a person would be scored the same.
+* **Thresholds.** SPEC §5.2: `p >= 0.9` ends the turn, `0.5-0.9` ends it with terminal
+  punctuation. Reported at 0.5, 0.7 and 0.9. The server scores Smart Turn **once per pause**,
+  when the pause reaches 150 ms (every `eou` here carried `pause_ms` 160), so a longer
+  pause does not re-score: the 400, 700 and 1000 ms variants differ only in how long the
+  false decision stands.
+
+### Host and server build
+
+| Item | Value |
+| --- | --- |
+| Server | SpeechForge `/health` version 0.2.0 (`api` 1), source `main` at `bb8fb39` |
+| Engines | Parakeet TDT 0.6B v2 (fp32, CUDA), Smart Turn v3.2 (GPU build), Chatterbox Turbo (fp16) |
+| Card | RTX 3090 (CUDA 3, sm_86) |
+| Client | `scripts/eot_probe.py` on the same host, loopback `sf.1`; one session, 0 `busy` or other errors, 0 disconnects |
+
+### Before: results
+
+Clip runs scored: 75 (0 failed), inserted pauses: 90.
+
+### False end-of-turn at inserted mid-sentence pauses
+
+A pause counts as a false end of turn when an `eou` with `p >= threshold` fired at it.
+
+| utterance | pause ms | pauses | p >= 0.5 | p >= 0.7 | p >= 0.9 | no eou |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 s | 400 | 15 | 14/15 (93%) | 13/15 (87%) | 8/15 (53%) | 0 |
+| 8 s | 700 | 15 | 13/15 (87%) | 12/15 (80%) | 8/15 (53%) | 0 |
+| 8 s | 1000 | 15 | 14/15 (93%) | 12/15 (80%) | 8/15 (53%) | 0 |
+| 8 s | all | 45 | 41/45 (91%) | 37/45 (82%) | 24/45 (53%) | 0 |
+| 15 s | 400 | 15 | 7/15 (47%) | 5/15 (33%) | 3/15 (20%) | 0 |
+| 15 s | 700 | 15 | 9/15 (60%) | 7/15 (47%) | 4/15 (27%) | 0 |
+| 15 s | 1000 | 15 | 9/15 (60%) | 6/15 (40%) | 2/15 (13%) | 0 |
+| 15 s | all | 45 | 25/45 (56%) | 18/45 (40%) | 9/45 (20%) | 0 |
+| all | 400 | 30 | 21/30 (70%) | 18/30 (60%) | 11/30 (37%) | 0 |
+| all | 700 | 30 | 22/30 (73%) | 19/30 (63%) | 12/30 (40%) | 0 |
+| all | 1000 | 30 | 23/30 (77%) | 18/30 (60%) | 10/30 (33%) | 0 |
+| all | all | 90 | 66/90 (73%) | 55/90 (61%) | 33/90 (37%) | 0 |
+
+### Distribution of `p`
+
+Mid-sentence pauses (an `eou` that fired there) against the true end of the utterance and against pauses inside speech that were not inserted.
+
+| where | n | no eou | p10 | p25 | p50 | p75 | p90 | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| mid-sentence 400 ms | 30 | 0 | 0.02 | 0.49 | 0.77 | 0.98 | 0.99 | 0.99 |
+| mid-sentence 700 ms | 30 | 0 | 0.02 | 0.42 | 0.77 | 0.98 | 0.99 | 0.99 |
+| mid-sentence 1000 ms | 30 | 0 | 0.02 | 0.55 | 0.78 | 0.98 | 0.99 | 0.99 |
+| mid-sentence, all | 90 | 0 | 0.02 | 0.49 | 0.77 | 0.98 | 0.99 | 0.99 |
+| true end, short, clean | 5 | 0 | 0.99 | 0.99 | 0.99 | 0.99 | 0.99 | 0.99 |
+| true end, 8 s, clean | 5 | 0 | 0.83 | 0.90 | 0.93 | 0.98 | 0.98 | 0.98 |
+| true end, 8 s, after pauses | 30 | 0 | 0.07 | 0.93 | 0.96 | 0.99 | 0.99 | 0.99 |
+| true end, 15 s, clean | 5 | 0 | 0.01 | 0.01 | 0.11 | 0.75 | 0.85 | 0.92 |
+| true end, 15 s, after pauses | 30 | 0 | 0.01 | 0.10 | 0.43 | 0.84 | 0.97 | 0.98 |
+| other pauses inside speech | 0 | 0 | - | - | - | - | - | - |
+
+### `p` by script (synthetic voices differ)
+
+Median (min-max) of `p` at the inserted pauses and at the true end, over every rep and pause variant of the script. A low true-end `p` is a property of the synthetic clip as Smart Turn hears it, not of the pipeline.
+
+| script | voice | runs | pauses | p at pauses | p at true end |
+| --- | --- | --- | --- | --- | --- |
+| s15a | david | 14 | 18 | 0.02 (0.01-0.93) | 0.89 (0.72-0.98) |
+| s15b | zira | 14 | 18 | 0.54 (0.20-0.80) | 0.01 (0.01-0.44) |
+| s15c | mark | 7 | 9 | 0.99 (0.76-0.99) | 0.38 (0.04-0.84) |
+| s8a | david | 14 | 18 | 0.80 (0.76-0.98) | 0.99 (0.78-0.99) |
+| s8b | zira | 14 | 18 | 0.98 (0.30-0.98) | 0.96 (0.90-0.98) |
+| s8c | mark | 7 | 9 | 0.99 (0.33-0.99) | 0.08 (0.01-0.90) |
+| sh1 | david | 2 | 0 | - | 0.99 (0.99-0.99) |
+| sh2 | zira | 2 | 0 | - | 0.99 (0.99-0.99) |
+| sh3 | mark | 1 | 0 | - | 0.99 (0.99-0.99) |
+
+### `p` against the punctuation of the latest partial
+
+The newest `stt.partial` received before each `eou`: does its text end in `.`, `?` or `!`? (The inserted pauses follow unpunctuated clauses; the recogniser may still add punctuation.)
+
+| where | n | p50 | p >= 0.5 | p >= 0.7 | p >= 0.9 |
+| --- | --- | --- | --- | --- | --- |
+| mid-sentence pause, punctuated | 89 | 0.78 | 65/89 (73%) | 54/89 (61%) | 33/89 (37%) |
+| mid-sentence pause, unpunctuated | 1 | 0.76 | 1/1 (100%) | 1/1 (100%) | 0/1 (0%) |
+| true end, punctuated | 74 | 0.91 | 50/74 (68%) | 49/74 (66%) | 38/74 (51%) |
+| true end, unpunctuated | 1 | 0.99 | 1/1 (100%) | 1/1 (100%) | 1/1 (100%) |
+
+### End-of-turn latency (true speech end to first qualifying `eou`)
+
+Wall time from the moment the frame holding the last speech sample left the client to the arrival of the `eou`. `miss` = no `eou` with `p >= threshold` at the end.
+
+| threshold | utterance | n | miss | p50 ms | p90 ms | max ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| any eou | short | 5 | 0 | 270 | 281 | 285 |
+| any eou | 8 s | 35 | 0 | 266 | 341 | 386 |
+| any eou | 15 s | 35 | 0 | 257 | 327 | 364 |
+| p >= 0.5 | short | 5 | 0 | 270 | 281 | 285 |
+| p >= 0.5 | 8 s | 35 | 5 | 265 | 338 | 355 |
+| p >= 0.5 | 15 s | 35 | 19 | 291 | 335 | 364 |
+| p >= 0.7 | short | 5 | 0 | 270 | 281 | 285 |
+| p >= 0.7 | 8 s | 35 | 6 | 266 | 338 | 355 |
+| p >= 0.7 | 15 s | 35 | 19 | 291 | 335 | 364 |
+| p >= 0.9 | short | 5 | 0 | 270 | 281 | 285 |
+| p >= 0.9 | 8 s | 35 | 8 | 266 | 339 | 355 |
+| p >= 0.9 | 15 s | 35 | 28 | 294 | 335 | 336 |
+
+Per clip class at `p >= 0.5`:
+
+| class | n | miss | p50 ms | p90 ms | max ms |
+| --- | --- | --- | --- | --- | --- |
+| short/0 | 5 | 0 | 270 | 281 | 285 |
+| 15/0 | 5 | 3 | 269 | 285 | 289 |
+| 15/1x1000 | 5 | 3 | 268 | 289 | 294 |
+| 15/1x400 | 5 | 2 | 281 | 295 | 298 |
+| 15/1x700 | 5 | 2 | 320 | 355 | 364 |
+| 15/2x1000 | 5 | 3 | 313 | 328 | 332 |
+| 15/2x400 | 5 | 3 | 335 | 336 | 336 |
+| 15/2x700 | 5 | 3 | 269 | 277 | 280 |
+| 8/0 | 5 | 0 | 292 | 315 | 329 |
+| 8/1x1000 | 5 | 1 | 290 | 310 | 312 |
+| 8/1x400 | 5 | 1 | 239 | 323 | 355 |
+| 8/1x700 | 5 | 1 | 282 | 330 | 343 |
+| 8/2x1000 | 5 | 0 | 235 | 250 | 250 |
+| 8/2x400 | 5 | 1 | 296 | 345 | 348 |
+| 8/2x700 | 5 | 1 | 290 | 313 | 316 |
+
+### `stt.final` cost, flush wall time and partials
+
+`ms` is the server's figure in the `stt.final` frame; wall is `stt.flush` sent to `stt.final` received, 1.5 s after the speech end. Partials are per utterance.
+
+| utterance | n | ms p50 | ms p90 | ms p99 | ms max | wall p50 | wall p90 | wall p99 | wall max | partials/utt | lag p50 | lag p90 | lag p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| short | 5 | 86 | 117 | 129 | 130 | 87 | 117 | 129 | 130 | 6 | 78 | 94 | 136 |
+| 8 s | 35 | 96 | 168 | 174 | 175 | 100 | 169 | 175 | 176 | 33 | 79 | 109 | 172 |
+| 15 s | 35 | 97 | 153 | 190 | 205 | 100 | 154 | 191 | 206 | 65 | 93 | 109 | 172 |
+
+### Final text against the script (word overlap)
+
+| utterance | n | mean % | min % | runs under 80 % |
+| --- | --- | --- | --- | --- |
+| short | 5 | 100 | 100 | 0 |
+| 8 s | 35 | 100 | 96 | 0 |
+| 15 s | 35 | 100 | 97 | 0 |
+
+Reproduce (token read from the environment or an env file, never printed):
+
+```
+python scripts/eot_probe.py --out run --reps 5 --token-file <speechforge.env>
+python scripts/eot_probe.py --summarise run/records.jsonl
+```
+
+### What the baseline says
+
+* **A pause is not a turn end, and `p` cannot tell them apart.** 73 % of the inserted
+  mid-sentence pauses drew `p >= 0.5` and 37 % drew `p >= 0.9`, at 400 ms exactly as at
+  1000 ms (the score is taken once, at 150 ms). The median `p` at a mid-sentence pause (0.77)
+  sits close to the median at the true end of the control utterances (0.93 for 8 s). Where a
+  clause stops on a function word ("agreed on", "teams") Smart Turn does score low (p10 0.02);
+  where it stops on a complete clause it scores 0.8-0.99.
+* **Terminal punctuation does not help here.** The newest partial before the `eou` ended in
+  `.`, `?` or `!` for 89 of the 90 mid-sentence pauses: Parakeet punctuates the clause
+  boundary of any pause, however the speaker meant to continue.
+* **Latency of the decision.** The true-end `eou` arrives 270 ms (p50) and 340 ms (p90) after
+  the last speech sample leaves the client: the rig stamps the pause start about 65 ms
+  after that sample, the pause must reach 150 ms, and the Smart Turn call takes 19 ms (p50)
+  to 95 ms (p90) on the shared lane; VAD windowing and transport make up the rest.
+  That is inside the SPEC target (p50 <= 350 ms, p90 <= 550 ms), so the headroom for a
+  silence floor is the difference between those targets and the floor.
+* **`stt.final` costs about 100 ms at the flush, whatever the length**: the `ms` field
+  (p50 96-97 ms for 8 s and 15 s utterances) matches the flush-to-final wall time within a
+  few ms. The tail (p90 150-170 ms, p99 175-190 ms) is the GPU lane shared with partials
+  and Smart Turn. Partials arrive steadily (33 per 8 s utterance, 65 per 15 s) with `lag_ms`
+  p50 79-93 ms, p90 109 ms.
+* **The recogniser is sound on these clips** (word overlap 96-100 %), so the figures above are
+  not an artefact of broken audio.
+
+### After
+
+**After (pending):** the post-fix numbers will be filled in here, from the same
+`scripts/eot_probe.py` run and clip set, after the end-of-turn floor and the final
+pre-emption land.
