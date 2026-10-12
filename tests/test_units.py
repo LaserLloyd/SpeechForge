@@ -254,6 +254,67 @@ def test_rolling_stt_commits_long_tails_at_a_pause():
     assert job.tail_start == job.commit_end and len(job.tail) <= 2 * RATE
 
 
+def test_release_partial_puts_a_withdrawn_commit_back():
+    s = RollingStt(vad=EnergyVad().stream(), max_tail_s=2.0, clock=lambda: 0.0)
+    pts = 0
+    for chunk in (_speech(RATE), np.zeros(8000, "<i2"), _speech(RATE + 8000)):
+        for i in range(0, len(chunk), 320):
+            s.push(pts, chunk[i : i + 320])
+            pts += 320
+    job = s.take_partial(now=1.0)
+    assert job.commit is not None and s.tail_start == job.commit_end
+    s.release_partial(job)  # the lane never ran it: the final decodes the whole tail
+    assert s.tail_start == 0 and len(s.take_final().tail) == s.end
+
+
+def test_release_partial_without_a_commit_changes_nothing():
+    s = RollingStt(vad=EnergyVad().stream(), clock=lambda: 0.0)
+    for i in range(0, RATE, 320):
+        s.push(i, _speech(320))
+    job = s.take_partial(now=1.0)
+    assert job.commit is None
+    s.release_partial(job)
+    assert s.tail_start == 0 and len(s.take_final().tail) == RATE
+
+
+async def test_lane_ticket_withdraws_only_a_job_that_has_not_started():
+    import asyncio
+    import threading
+
+    from speechforge.lanes import PRIO_EOU, PRIO_PARTIAL, SttLane, Ticket
+
+    lane = SttLane("sf-test-lane")
+    try:
+        gate = threading.Event()
+        ran: list[str] = []
+        blocker = lane.submit(PRIO_EOU, lambda: (gate.wait(5), ran.append("blocker"))[0])
+        queued_t, started_t = Ticket(), Ticket()
+        queued = lane.submit(PRIO_PARTIAL, lambda: ran.append("queued"), queued_t)
+        assert queued_t.cancel() is True and queued_t.cancelled
+        queued.cancel()
+        gate.set()
+        await blocker
+        # the worker has now passed the withdrawn job without running it
+        started = lane.submit(PRIO_PARTIAL, lambda: ran.append("started") or 7, started_t)
+        assert await started == 7
+        assert started_t.cancel() is False and not started_t.cancelled  # too late: it ran
+        await asyncio.sleep(0.05)
+        assert ran == ["blocker", "started"]
+        # a cancelled ticket whose future is NOT cancelled still never hangs the awaiter
+        gate2 = threading.Event()
+        blocker2 = lane.submit(PRIO_EOU, lambda: gate2.wait(5))
+        t3 = Ticket()
+        orphan = lane.submit(PRIO_PARTIAL, lambda: ran.append("orphan"), t3)
+        assert t3.cancel()
+        gate2.set()
+        await blocker2
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(orphan, 2)
+        assert "orphan" not in ran
+    finally:
+        lane.close()
+
+
 def test_rolling_stt_gaps_and_overlaps():
     s = RollingStt(vad=EnergyVad().stream())
     s.push(0, _speech(320))

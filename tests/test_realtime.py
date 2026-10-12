@@ -229,6 +229,68 @@ def test_partials_eou_final_and_reset(config, studioforge):
         assert pong["vram_free_mib"] == 18000 and "queue" in pong
 
 
+def test_final_withdraws_a_queued_partial_and_holds_new_ones(config, studioforge):
+    import threading
+
+    from speechforge.lanes import PRIO_EOU
+
+    app, _, stt, _ = build(config, studioforge)
+    with TestClient(app) as tc, connect(tc) as ws:
+        hello(ws)
+        mgr = app.state.sessions
+        sess = next(iter(mgr.sessions.values()))
+        gate = threading.Event()
+
+        async def block():  # a slow job ahead of everything: the lane is busy
+            return mgr.lane.submit(PRIO_EOU, lambda: gate.wait(10))
+
+        tc.portal.call(block)
+        try:
+            for f in speech(1.0):
+                ws.send_bytes(f)
+                time.sleep(0.016)
+            for _ in range(200):  # the partial is spawned and queued behind the blocker
+                if sess._partial_inflight is not None:
+                    break
+                time.sleep(0.01)
+            assert sess._partial_inflight is not None
+            _ticket, partial_fut, _job = sess._partial_inflight
+            assert not partial_fut.done()
+            calls_before = stt.calls
+            ws.send_text(json.dumps({"type": "stt.flush", "id": "f9"}))
+            for _ in range(200):
+                if partial_fut.cancelled():
+                    break
+                time.sleep(0.01)
+            assert partial_fut.cancelled() and sess._final_pending == 1
+            for _ in range(200):  # _partial swallows the cancellation and clears its flag
+                if not sess._partial_pending:
+                    break
+                time.sleep(0.01)
+            assert sess._partial_inflight is None and not sess._partial_pending
+            # The socket loop is parked in the flush handler, so feed the session directly:
+            # audio that arrives while the final is pending must not spawn a partial.
+            for f in speech(0.5, 16000):
+                tc.portal.call(sess.on_bytes, f)
+                time.sleep(0.016)
+            assert sess.stt.partial_due()  # one would be due -- and is held back
+            assert sess._partial_inflight is None and not sess._partial_pending
+            assert stt.calls == calls_before  # nothing was decoded for it
+        finally:
+            gate.set()
+        fin, _, _ = until(ws, "stt.final")
+        assert fin["id"] == "f9" and fin["upto"] == 16000
+        # the withdrawn partial's audio is in the final: the whole utterance, once
+        assert fin["text"] == f"final {fin['upto']} samples"
+        assert sess._final_pending == 0
+        assert stt.calls == calls_before + 1  # only the final decoded
+        # partials resume afterwards
+        for f in speech(0.6, 16000 + 8000):
+            ws.send_bytes(f)
+            time.sleep(0.016)
+        until(ws, "stt.partial")
+
+
 def test_ingest_is_rate_limited(config, studioforge):
     app, *_ = build(config, studioforge)
     with TestClient(app) as tc, connect(tc) as ws:

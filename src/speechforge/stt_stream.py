@@ -80,6 +80,7 @@ class PartialJob:
     commit_start: int = 0
     commit_end: int = 0
     streaming: bool = False
+    prev_fed: int = 0  # streaming: the fed mark before this job advanced it
 
 
 @dataclass
@@ -283,8 +284,10 @@ class RollingStt:
         self._last_partial_upto = upto
         if self.streaming:
             fed = max(self._fed, self.tail_start)
-            self._fed = upto
-            return PartialJob(self.audio(fed, upto), self.tail_start, upto, streaming=True)
+            prev_fed, self._fed = self._fed, upto
+            return PartialJob(
+                self.audio(fed, upto), self.tail_start, upto, streaming=True, prev_fed=prev_fed
+            )
         commit = None
         cs = ce = 0
         if upto - self.tail_start > self.max_tail_s * RATE:
@@ -294,6 +297,15 @@ class RollingStt:
             self.tail_start = ce
             self._prev_tail_words = []
         return PartialJob(self.audio(self.tail_start, upto), self.tail_start, upto, commit, cs, ce)
+
+    def release_partial(self, job: PartialJob) -> None:
+        """Undo ``take_partial`` for a job that never ran (withdrawn from the
+        lane), so the audio it would have fed or committed is still pending
+        for the next job -- the final."""
+        if job.streaming:
+            self._fed = job.prev_fed
+        elif job.commit is not None:
+            self.tail_start = job.commit_start
 
     def _commit_boundary(self, upto: int) -> int:
         """End of the tail's last >= 300 ms pause, else a hard cut keeping 2 s."""
