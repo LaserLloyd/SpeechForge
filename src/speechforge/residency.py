@@ -23,8 +23,9 @@ Promises:
   sessions are open or requests ran.
 * **Unleased is not exempt** (S29): a server that loaded without a lease because
   StudioForge was unreachable retries the lease every ``studioforge.relink_s``.
-  Granted -> it holds one from then on (``held``). Refused -> the card is
-  committed to someone else, so it gives way exactly like a vacate would.
+  Granted -> it holds one from then on (``held``). Refused with
+  ``lease_conflict`` -> the card is committed to someone else, so it gives way
+  exactly like a vacate would; any other refusal is transient and it asks again.
 * **Vacate** (D56): the session manager announces ``state: vacating``, lets
   current contexts finish (bounded), then unload, release, cool down.
 """
@@ -168,6 +169,7 @@ class Residency:
         self._last_used = clock()
         self._last_touch = clock()
         self._last_relink = clock()
+        self._relink_last_code: str | None = None
         self._active_since_touch = False
         self._bringup: asyncio.Task[None] | None = None
         self._unload_task: asyncio.Task[None] | None = None
@@ -647,11 +649,18 @@ class Residency:
             log.info("StudioForge is reachable again; now holding a lease on CUDA %d", device)
             await self._notify("on_lease_state", "held")
             return False
+        if isinstance(outcome, Refused) and outcome.code != "lease_conflict":
+            # Transient: the card is being cleared for us (lease_vacating) or a resident
+            # is mid-request (model_busy). Keep serving and ask again next interval.
+            if outcome.code != self._relink_last_code:
+                log.info("StudioForge refused the lease for now (%s); asking again", outcome.code)
+            self._relink_last_code = outcome.code
+            return False
         if isinstance(outcome, Refused):
             self.counters["vacates"] += 1
             METRICS.inc("lease_events_total", event="relink_refused")
             log.info(
-                "StudioForge is back and refused the lease (%s); giving the card back",
+                "StudioForge is back and the card is committed elsewhere (%s); giving it back",
                 outcome.code,
                 extra={"state": self.state},
             )

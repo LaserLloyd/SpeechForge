@@ -421,6 +421,22 @@ async def test_relink_refusal_gives_way_like_a_vacate(config, studioforge, clock
     assert exc.value.code == "gpu_vacated" and exc.value.retry_after_s == pytest.approx(120)
 
 
+async def test_relink_transient_refusal_keeps_serving_and_retries(config, studioforge, clock):
+    res, told, tts = await unleased(config, studioforge, clock)
+    studioforge.down = False
+    for code in ("lease_vacating", "model_busy"):
+        studioforge.refuse = (409 if code == "lease_vacating" else 503, code, 5)
+        clock.advance(31)
+        await res.tick()
+        assert res.state == "ready" and res.lease is None and not tts.closed
+        assert told.events == [] and res.counters["vacates"] == 0
+    studioforge.refuse = None  # the card is clear now: granted on the next try
+    clock.advance(31)
+    await res.tick()
+    assert res.state == "ready" and res.lease is not None
+    assert told.events == [("lease", "held")]
+
+
 async def test_relink_still_unreachable_waits_for_the_next_interval(config, studioforge, clock):
     res, told, _ = await unleased(config, studioforge, clock)
     reason = res.unleased_reason

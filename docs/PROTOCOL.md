@@ -136,10 +136,13 @@ A `credit` for an unknown or finished ctx is ignored.
   * Unreachable at load: the rig asks StudioForge for the lease again every
     `studioforge.relink_s` (default 30 s) while the models stay loaded. When it is granted the
     rig sends `state{lease:"held"}` and from then on behaves as `held` above. When StudioForge
-    is back but refuses (the card is committed to a higher-priority load) the rig gives way
-    exactly as for a vacate: `state{lease:"vacating", deadline_s}`, the open contexts finish
-    (bounded), new `tts.open` is refused with `vacated`, then every session gets the fatal
-    `vacated` error and a 1001 close. While StudioForge stays unreachable nothing changes.
+    is back but refuses with `lease_conflict` (the card is leased by, or promised to, an equal or
+    better class) the rig gives way exactly as for a vacate: `state{lease:"vacating",
+    deadline_s}`, the open contexts finish (bounded), new `tts.open` is refused with `vacated`,
+    then every session gets the fatal `vacated` error and a 1001 close. A transient refusal
+    (`lease_vacating`: the card is being cleared for us; `model_busy`: a resident is mid-request)
+    changes nothing; the rig keeps serving and asks again at the next interval. While StudioForge
+    stays unreachable nothing changes either.
     So this kind of `unleased` still gives way to a priority-1 load, at most about one retry
     interval after StudioForge is reachable.
   * `lease_mode: off`: there is no StudioForge to ask. The rig never leases and never gives way;
