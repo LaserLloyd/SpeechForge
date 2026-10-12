@@ -69,7 +69,7 @@ class Session:
         self.stt: RollingStt | None = None
         self.stt_config: dict[str, Any] = {
             "partial_ms": self.cfg.partial_ms,
-            "eou": {"enabled": True, "min_pause_ms": self.cfg.min_pause_ms},
+            "eou": {"enabled": True, "min_pause_ms": self._eou_floor(self.cfg.min_pause_ms)},
         }
         self.ctxs: dict[int, TtsContext] = {}
         self.queued: list[TtsContext] = []
@@ -204,6 +204,10 @@ class Session:
             "lease": {"state": self.m.lease_state(), "id": lease.lease_id if lease else None},
         }
 
+    def _eou_floor(self, requested: int) -> int:
+        """The client's ``min_pause_ms`` is a request; the server floor wins."""
+        return max(requested, self.m.config.eou.min_silence_ms)
+
     def start_stt(self) -> None:
         sp = self.m.residency.speaker
         vad_state = sp.vad.stream() if sp is not None and sp.vad is not None else None
@@ -215,7 +219,9 @@ class Session:
         stream = sp.stt.create_stream() if sp is not None and is_streaming_stt(sp.stt) else None
         self.stt = RollingStt(
             partial_ms=int(self.stt_config.get("partial_ms", self.cfg.partial_ms)),
-            min_pause_ms=int(eou.get("min_pause_ms", self.cfg.min_pause_ms)),
+            min_pause_ms=self._eou_floor(int(eou.get("min_pause_ms", self.cfg.min_pause_ms))),
+            min_silence_ms=self.m.config.eou.min_silence_ms,
+            unpunctuated_silence_ms=self.m.config.eou.unpunctuated_silence_ms,
             max_tail_s=self.cfg.max_tail_s,
             max_utterance_s=self.cfg.max_utterance_s,
             vad=vad_state,
@@ -318,7 +324,7 @@ class Session:
                 cur["enabled"] = eou["enabled"]
             mp = eou.get("min_pause_ms")
             if isinstance(mp, int) and not isinstance(mp, bool):
-                cur["min_pause_ms"] = max(60, min(2000, mp))
+                cur["min_pause_ms"] = self._eou_floor(max(60, min(2000, mp)))
         hot = msg.get("hotwords")
         if hot is not None and (not isinstance(hot, list) or len(hot) > 64):
             await self.error("bad_frame", "hotwords: at most 64 strings")

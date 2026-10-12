@@ -14,7 +14,8 @@ touch a model):
   tail is first *committed* at its last >= 300 ms pause (or cut hard), so a
   partial never re-decodes more than ``max_tail_s``. ``stable_words`` is v3's
   rule: words agreeing with the previous partial, minus 2.
-* **EOU**: once per pause of ``min_pause_ms`` after speech, Smart Turn on the
+* **EOU**: once per pause of ``min_pause_ms`` (never below the server floors, longer
+  mid-sentence) after speech, Smart Turn on the
   last 8 s up to the pause start.
 * **Final** (``stt.flush``): decode the tail with word timings, join the
   committed segments, report ``upto`` (mic clock) and start a new utterance
@@ -102,6 +103,11 @@ class EouJob:
 class RollingStt:
     partial_ms: int = 160
     min_pause_ms: int = 150
+    #: Server floors (``EouConfig``): the pause event waits for ``max(min_pause_ms,
+    #: min_silence_ms)`` after a partial ending a sentence, and for the longer
+    #: ``unpunctuated_silence_ms`` otherwise. 0 = no floor.
+    min_silence_ms: int = 0
+    unpunctuated_silence_ms: int = 0
     max_tail_s: float = 8.0
     max_utterance_s: float = 60.0
     vad: Any = None  # a per-session VAD state: callable(window float32) -> prob
@@ -256,7 +262,7 @@ class RollingStt:
                 and not self._pause_reported
             ):
                 pause = self._vad_pos - self.speech_end
-                if pause * 1000 >= self.min_pause_ms * RATE:
+                if pause * 1000 >= self.pause_trigger_ms() * RATE:
                     self._pause_reported = True
                     events.append(
                         {
@@ -266,6 +272,16 @@ class RollingStt:
                         }
                     )
         return events
+
+    def pause_trigger_ms(self) -> int:
+        """Silence needed before the pause event fires: the client's ``min_pause_ms``
+        raised to the server floor, and to the longer unpunctuated floor while the
+        latest partial does not end in ``. ? !`` (a pause inside a sentence)."""
+        ms = max(self.min_pause_ms, self.min_silence_ms)
+        text = self._last_partial_text
+        if text is None or not _PUNCT_END.search(text):
+            ms = max(ms, self.unpunctuated_silence_ms)
+        return ms
 
     # ------------------------------------------------------------------ jobs
     def partial_due(self, now: float | None = None) -> bool:

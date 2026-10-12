@@ -242,6 +242,72 @@ def test_rolling_stt_pause_partial_final_and_carry_over():
     assert s.tail_start == RATE + 4800 and s.end == RATE + 5120
 
 
+def _paused_stt(text, **kw):
+    """A RollingStt one second into speech with ``text`` as its latest partial."""
+    s = RollingStt(vad=EnergyVad().stream(), clock=lambda: 0.0, **kw)
+    ev = []
+    for i in range(0, RATE, 320):
+        ev += s.push(i, _speech(320))
+    s.apply_partial(s.take_partial(now=1.0), text, 5)
+    return s
+
+
+def _silence_until_pause(s, ms):
+    """Feed ``ms`` more silence from where the stream stands; return the ``_pause`` events."""
+    ev = []
+    for i in range(s.expected, s.expected + ms * RATE // 1000, 320):
+        ev += s.push(i, np.zeros(320, "<i2"))
+    return [e for e in ev if e["type"] == "_pause"]
+
+
+def test_pause_gating_punctuated_fires_at_the_short_floor():
+    s = _paused_stt("that is the end.", min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert _silence_until_pause(s, 250) == []  # under the floor
+    ev = _silence_until_pause(s, 100)
+    assert len(ev) == 1 and 300 <= ev[0]["pause_ms"] < 400  # once, near the floor
+
+
+def test_pause_gating_unpunctuated_waits_for_the_long_floor():
+    s = _paused_stt("and then he said", min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert _silence_until_pause(s, 700) == []  # a mid-sentence breath: not consulted
+    ev = _silence_until_pause(s, 200)
+    assert len(ev) == 1 and 800 <= ev[0]["pause_ms"] < 900
+    # still once per pause
+    assert _silence_until_pause(s, 500) == []
+
+
+def test_pause_gating_resumed_speech_before_the_long_floor_fires_nothing():
+    s = _paused_stt("and then he said", min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert _silence_until_pause(s, 600) == []
+    ev = []
+    for i in range(s.expected, s.expected + RATE // 2, 320):
+        ev += s.push(i, _speech(320))
+    assert not [e for e in ev if e["type"] == "_pause"]
+    # the pause clock restarts with the next pause
+    assert _silence_until_pause(s, 700) == []
+
+
+def test_pause_gating_punctuation_arriving_mid_pause_releases_it():
+    s = _paused_stt("and then he said", min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert _silence_until_pause(s, 400) == []
+    s._last_partial_text = "and then he said so."  # the partial catches up during the pause
+    ev = _silence_until_pause(s, 100)
+    assert len(ev) == 1
+
+
+def test_pause_gating_client_min_pause_is_clamped_by_the_floor():
+    # a client asking for 60 ms still waits for the server's floor
+    s = _paused_stt("done.", min_pause_ms=60, min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert s.pause_trigger_ms() == 300
+    assert _silence_until_pause(s, 250) == []
+    # a client asking for more than the floor is honoured
+    s = _paused_stt("done.", min_pause_ms=500, min_silence_ms=300, unpunctuated_silence_ms=800)
+    assert s.pause_trigger_ms() == 500
+    # and a floor-less RollingStt keeps the old behaviour
+    s = _paused_stt("and then", min_pause_ms=150)
+    assert s.pause_trigger_ms() == 150
+
+
 def test_rolling_stt_commits_long_tails_at_a_pause():
     s = RollingStt(vad=EnergyVad().stream(), max_tail_s=2.0, clock=lambda: 0.0)
     pts = 0
