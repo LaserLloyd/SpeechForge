@@ -426,3 +426,37 @@ last 8 s of audio and scores acoustic cues, so at 150 ms it cannot tell a breath
 ASR's own punctuation can. A clean full stop followed by ~300 ms of silence still gets its verdict
 in well under a second, which is what the fast path needs. Keeping the floor on the server means no
 client configuration can bring the false end of turn back.
+
+## S27 -- A vacate waits for audio in progress, not for an open context
+
+**Decision.** `TtsContext.producing` is True only while the context has work in hand: a unit
+taken from the queue and not yet fully handled (rendered and flushed), queued units, buffered
+text that a flush or close will cut into a unit, or a close whose `tts.done` is still to be
+sent. `SessionManager.before_unload` waits (bounded by `drain_timeout_s`) only while some
+context is `not done and producing`. An open context with nothing to say no longer holds the
+drain; nothing else about the drain changed (a context still running when the bound expires is
+stopped by the unload path, as before).
+
+**Why.** A voice chat keeps a context open between sentences. Its producer thread polls for the
+next unit, so `done` stayed False and every vacate cost the full 15 s of the bound for nothing,
+while the owner's other tenant waited for the card. The unit is marked busy under the same lock
+that pops it, so there is no instant at which a unit in flight looks idle.
+
+## S28 -- A final does not wait behind its own partials
+
+**Decision.** On `stt.flush` the session cancels its partial if the STT lane has not started
+it, and holds off new partials until the final has been sent. The lane job carries a `Ticket`
+that the worker claims before running; `Ticket.cancel()` wins only while nobody has, so a job
+is either withdrawn whole or runs whole (a partial already decoding is left to finish, one
+decode, ~85 ms). A withdrawn job is undone with `RollingStt.release_partial` -- the streaming
+fed mark, or the tail start a commit had moved -- so the final decodes that audio itself and
+the text is the same as without the withdrawal. `Session._final_pending` counts flushes in
+flight; `on_audio` does not spawn a partial while it is non-zero, and a partial task spawned
+just before the flush returns without taking a job. The cancelled future's `CancelledError` is
+swallowed in `_partial` (no warning) and `_partial_pending` is still cleared. `stt_final_ms` is
+unchanged.
+
+**Why.** The lane is one worker with a priority queue. A final outranks a partial but cannot
+pre-empt one, so on a long utterance with continuous partials the final could sit behind a
+decode that was already queued for audio the final is about to cover anyway. The final is what
+the box waits on; a partial that is stale the moment the flush arrives is worth nothing.

@@ -160,6 +160,25 @@ def test_streaming_partials_feed_only_new_audio_at_the_cadence():
     assert h.fed == [RATE, 320] and h.total == RATE + 320
 
 
+def test_streaming_withdrawn_partial_leaves_its_audio_for_the_final():
+    stt = FakeStreamingStt()
+    h = stt.create_stream()
+    s = RollingStt(vad=EnergyVad().stream(), clock=lambda: 0.0, stream=h)
+    sp = _Speaker(stt)
+    for i in range(0, RATE, 320):
+        s.push(i, _speech(320))
+    s.decode_partial(s.take_partial(now=1.0), sp)  # RATE fed
+    for i in range(RATE, 2 * RATE, 320):
+        s.push(i, _speech(320))
+    withdrawn = s.take_partial(now=2.0)  # would feed the second second ...
+    assert len(withdrawn.tail) == RATE
+    s.release_partial(withdrawn)  # ... but the lane never ran it
+    fin = s.take_final("f1")
+    assert len(fin.tail) == RATE and fin.upto == 2 * RATE  # the final feeds it, once
+    text, _ = s.decode_final(fin, sp)
+    assert h.total == 2 * RATE and text == f"final {2 * RATE} samples"
+
+
 def test_streaming_final_from_finalize_then_fresh_utterance():
     stt = FakeStreamingStt()
     h = stt.create_stream()

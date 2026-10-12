@@ -262,6 +262,67 @@ def test_eou_waits_out_a_mid_sentence_pause_and_ignores_a_low_client_floor(confi
         assert e["pause_ms"] >= config.eou.unpunctuated_silence_ms
         assert eou.calls == 2  # warm-up + exactly one pause
 
+def test_final_withdraws_a_queued_partial_and_holds_new_ones(config, studioforge):
+    import threading
+
+    from speechforge.lanes import PRIO_EOU
+
+    app, _, stt, _ = build(config, studioforge)
+    with TestClient(app) as tc, connect(tc) as ws:
+        hello(ws)
+        mgr = app.state.sessions
+        sess = next(iter(mgr.sessions.values()))
+        gate = threading.Event()
+
+        async def block():  # a slow job ahead of everything: the lane is busy
+            return mgr.lane.submit(PRIO_EOU, lambda: gate.wait(10))
+
+        tc.portal.call(block)
+        try:
+            for f in speech(1.0):
+                ws.send_bytes(f)
+                time.sleep(0.016)
+            for _ in range(200):  # the partial is spawned and queued behind the blocker
+                if sess._partial_inflight is not None:
+                    break
+                time.sleep(0.01)
+            assert sess._partial_inflight is not None
+            _ticket, partial_fut, _job = sess._partial_inflight
+            assert not partial_fut.done()
+            calls_before = stt.calls
+            ws.send_text(json.dumps({"type": "stt.flush", "id": "f9"}))
+            for _ in range(200):
+                if partial_fut.cancelled():
+                    break
+                time.sleep(0.01)
+            assert partial_fut.cancelled() and sess._final_pending == 1
+            for _ in range(200):  # _partial swallows the cancellation and clears its flag
+                if not sess._partial_pending:
+                    break
+                time.sleep(0.01)
+            assert sess._partial_inflight is None and not sess._partial_pending
+            # The socket loop is parked in the flush handler, so feed the session directly:
+            # audio that arrives while the final is pending must not spawn a partial.
+            for f in speech(0.5, 16000):
+                tc.portal.call(sess.on_bytes, f)
+                time.sleep(0.016)
+            assert sess.stt.partial_due()  # one would be due -- and is held back
+            assert sess._partial_inflight is None and not sess._partial_pending
+            assert stt.calls == calls_before  # nothing was decoded for it
+        finally:
+            gate.set()
+        fin, _, _ = until(ws, "stt.final")
+        assert fin["id"] == "f9" and fin["upto"] == 16000
+        # the withdrawn partial's audio is in the final: the whole utterance, once
+        assert fin["text"] == f"final {fin['upto']} samples"
+        assert sess._final_pending == 0
+        assert stt.calls == calls_before + 1  # only the final decoded
+        # partials resume afterwards
+        for f in speech(0.6, 16000 + 8000):
+            ws.send_bytes(f)
+            time.sleep(0.016)
+        until(ws, "stt.partial")
+
 
 def test_ingest_is_rate_limited(config, studioforge):
     app, *_ = build(config, studioforge)
@@ -515,6 +576,54 @@ def test_vacate_announces_drains_and_closes(config, studioforge, voice_bytes):
         err, _, _ = until(ws, "error")
         assert err["code"] == "vacated" and err["fatal"] and err["retry_after_s"] == 120
     assert studioforge.leases == {} and tts.closed
+
+
+def _only_ctx(app, ws, ctx=1):
+    ws.send_text(json.dumps({"type": "ping", "t": 0}))
+    until(ws, "pong")  # the open has been handled
+    return next(iter(app.state.sessions.sessions.values())).ctxs[ctx]
+
+
+def test_drain_does_not_wait_for_an_open_idle_ctx(config, studioforge, voice_bytes):
+    app, *_ = build(config, studioforge)
+    with TestClient(app) as tc, connect(tc) as ws:
+        hello(ws)
+        vid = put_voice(ws, voice_bytes)
+        open_ctx(ws, vid)
+        tc_ = _only_ctx(app, ws)
+        assert not tc_.done and not tc_.producing  # open, nothing queued, nothing rendering
+        t0 = time.monotonic()
+        tc.portal.call(app.state.sessions.before_unload, "test", 10.0)
+        assert time.monotonic() - t0 < 2.0
+        assert not tc_.done  # the drain gave it no say; the unload path stops it later
+        # text that no flush has cut yet is work in hand
+        tc_.add_text("half a sentence", False)
+        assert tc_.producing
+        tc_.flush(None)
+        for _ in range(100):
+            if not tc_.producing:
+                break
+            time.sleep(0.02)
+        assert not tc_.producing and not tc_.done
+
+
+def test_drain_waits_for_a_ctx_mid_render(config, studioforge, voice_bytes):
+    app, *_ = build(config, studioforge, tts=FakeTts(chunks=10, step_s=0.05))
+    with TestClient(app) as tc, connect(tc) as ws:
+        hello(ws)
+        vid = put_voice(ws, voice_bytes)
+        open_ctx(ws, vid)
+        ws.send_text(
+            json.dumps({"type": "tts.text", "ctx": 1, "text": "Hello there.", "final": True})
+        )
+        ws.send_text(json.dumps({"type": "tts.close", "ctx": 1}))
+        until(ws, "tts.started")
+        tc_ = next(iter(app.state.sessions.sessions.values())).ctxs[1]
+        assert tc_.producing and not tc_.done
+        t0 = time.monotonic()
+        tc.portal.call(app.state.sessions.before_unload, "test", 10.0)
+        waited = time.monotonic() - t0
+        assert tc_.done and 0.1 < waited < 5.0  # ~0.5 s of rendering, then it let go
 
 
 def test_resume_reattaches_the_same_session(config, studioforge):

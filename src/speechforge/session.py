@@ -28,7 +28,7 @@ import numpy as np
 from speechforge import __version__
 from speechforge.engines.base import is_streaming_stt
 from speechforge.errors import SpeechError
-from speechforge.lanes import PRIO_EOU, PRIO_FINAL, PRIO_PARTIAL, SttLane
+from speechforge.lanes import PRIO_EOU, PRIO_FINAL, PRIO_PARTIAL, SttLane, Ticket
 from speechforge.metrics import METRICS, P_BUCKETS
 from speechforge.protocol import (
     KIND_MIC,
@@ -42,7 +42,7 @@ from speechforge.protocol import (
     pack_audio,
     unpack_audio,
 )
-from speechforge.stt_stream import RollingStt
+from speechforge.stt_stream import PartialJob, RollingStt
 from speechforge.tts_ctx import TtsContext
 from speechforge.voices import parse_voice_id, sha256_hex
 
@@ -74,6 +74,8 @@ class Session:
         self.ctxs: dict[int, TtsContext] = {}
         self.queued: list[TtsContext] = []
         self._partial_pending = False
+        self._final_pending = 0  # stt.flush calls waiting for / computing their final
+        self._partial_inflight: tuple[Ticket, asyncio.Future[Any], PartialJob] | None = None
         self._final_lock = asyncio.Lock()
         self._errors: deque[float] = deque()
         self._text_window: deque[tuple[float, int]] = deque()
@@ -266,7 +268,7 @@ class Session:
                     self._spawn(self._eou(ev["at"], ev["pause_ms"]))
             else:
                 await self.send(ev)
-        if not self._partial_pending and self.stt.partial_due():
+        if not self._partial_pending and not self._final_pending and self.stt.partial_due():
             self._partial_pending = True
             self._spawn(self._partial())
 
@@ -340,31 +342,55 @@ class Session:
     async def _on_stt_flush(self, msg: dict[str, Any]) -> None:
         if self.stt is None:
             return
-        async with self._final_lock:
-            stt = self.stt
-            job = stt.take_final(msg.get("id"))
-            sp = self.m.residency.speaker
-            if sp is None:
-                await self.error("not_ready", "models unloaded")
-                return
-            t0 = time.perf_counter()
+        # S28: the final is due. No new partial until it is sent, and a partial
+        # still queued behind other work is withdrawn rather than waited behind.
+        self._final_pending += 1
+        try:
+            self._withdraw_queued_partial()
+            async with self._final_lock:
+                stt = self.stt
+                if stt is None:
+                    return
+                job = stt.take_final(msg.get("id"))
+                sp = self.m.residency.speaker
+                if sp is None:
+                    await self.error("not_ready", "models unloaded")
+                    return
+                t0 = time.perf_counter()
 
-            def run() -> tuple[str, list[tuple[str, float, float]]]:
-                return stt.decode_final(job, sp)
+                def run() -> tuple[str, list[tuple[str, float, float]]]:
+                    return stt.decode_final(job, sp)
 
-            try:
-                text, words = await self.m.lane.submit(PRIO_FINAL, run)
-            except Exception as exc:  # noqa: BLE001
-                await self.error("engine_failed", type(exc).__name__)
-                return
-            ms = round((time.perf_counter() - t0) * 1000)
-            METRICS.observe("stt_final_ms", ms)
-            await self.send(stt.apply_final(job, text, words, ms))
+                try:
+                    text, words = await self.m.lane.submit(PRIO_FINAL, run)
+                except Exception as exc:  # noqa: BLE001
+                    await self.error("engine_failed", type(exc).__name__)
+                    return
+                ms = round((time.perf_counter() - t0) * 1000)
+                METRICS.observe("stt_final_ms", ms)
+                await self.send(stt.apply_final(job, text, words, ms))
+        finally:
+            self._final_pending -= 1
+
+    def _withdraw_queued_partial(self) -> None:
+        """Cancel this session's partial if the lane has not started it; the
+        audio it took goes back to the pending pool (``release_partial``). A
+        partial already decoding is left to finish (one decode, ~85 ms)."""
+        inflight = self._partial_inflight
+        if inflight is None or self.stt is None:
+            return
+        ticket, fut, pjob = inflight
+        if not ticket.cancel():
+            return
+        fut.cancel()
+        self.stt.release_partial(pjob)
+        self._partial_inflight = None
 
     async def _partial(self) -> None:
+        ticket = Ticket()
         try:
             stt, sp = self.stt, self.m.residency.speaker
-            if stt is None or sp is None:
+            if stt is None or sp is None or self._final_pending:
                 return
             job = stt.take_partial()
             t0 = time.perf_counter()
@@ -372,7 +398,9 @@ class Session:
             def run() -> tuple[str, list[tuple[str, float, float]] | None, str]:
                 return stt.decode_partial(job, sp)
 
-            ctext, cwords, tail = await self.m.lane.submit(PRIO_PARTIAL, run)
+            fut = self.m.lane.submit(PRIO_PARTIAL, run, ticket)
+            self._partial_inflight = (ticket, fut, job)
+            ctext, cwords, tail = await fut
             if self.stt is not stt:
                 return
             if job.commit is not None and cwords is not None:
@@ -383,10 +411,15 @@ class Session:
             if frame is not None:
                 METRICS.observe("stt_partial_lag_ms", frame["lag_ms"])
                 await self.send(frame)
+        except asyncio.CancelledError:
+            if not ticket.cancelled:
+                raise  # the task itself was cancelled (shutdown), not withdrawn
         except Exception as exc:  # noqa: BLE001 - a failed partial is skipped, not fatal
             log.warning("partial failed: %s", type(exc).__name__)
         finally:
             self._partial_pending = False
+            if self._partial_inflight is not None and self._partial_inflight[0] is ticket:
+                self._partial_inflight = None
 
     async def _eou(self, at: int, pause_ms: int) -> None:
         stt, sp = self.stt, self.m.residency.speaker
@@ -735,14 +768,15 @@ class SessionManager:
 
     async def before_unload(self, reason: str, timeout_s: float) -> None:
         """Vacate (or any unload with sessions open): stop new contexts, let the
-        current ones finish (bounded), then the residency unloads."""
+        ones that are producing audio finish (bounded), then the residency
+        unloads. A context that is open but idle does not hold the drain."""
         if not self.live():
             return
         self.vacating = True
         await self.on_lease_state("vacating", timeout_s)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and any(
-            not c.done for s in self.live() for c in s.ctxs.values()
+            not c.done and c.producing for s in self.live() for c in s.ctxs.values()
         ):
             await asyncio.sleep(0.05)
 

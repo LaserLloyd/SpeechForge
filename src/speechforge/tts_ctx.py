@@ -95,6 +95,7 @@ class TtsContext:
         self._buffer = ""
         self._units: list[tuple[str, Any]] = []  # (text, flush_id or None)
         self._closed = False
+        self._busy = False  # a unit has been taken and not yet fully handled
         self.stop = threading.Event()
         self.paused = False
         self._paused_since: float | None = None
@@ -174,6 +175,22 @@ class TtsContext:
         with self._cv:
             self._cv.notify_all()
 
+    @property
+    def producing(self) -> bool:
+        """True while this ctx has work in hand: a unit being rendered, queued
+        units, text that a flush or close will cut into a unit, or a close
+        whose ``tts.done`` is still to be sent. An open ctx waiting for more
+        text is not producing (the vacate drain does not wait for it)."""
+        with self._cv:
+            if self.done:
+                return False
+            return (
+                self._busy
+                or bool(self._units)
+                or bool(self._buffer.strip())
+                or (self._closed and not self.exited.is_set())
+            )
+
     # ----------------------------------------------------------- credit
     def assumed_played_ms(self) -> float:
         if self.played_ms is not None:
@@ -211,6 +228,7 @@ class TtsContext:
                 self._cv.wait(0.1)
             if self.stop.is_set() or not self._units:
                 return None
+            self._busy = True  # set under the lock, with the pop: no gap for a reader
             return self._units.pop(0)
 
     def _frames(self, pcm: np.ndarray, flush: bool) -> None:
@@ -245,19 +263,23 @@ class TtsContext:
                 if unit is None:
                     break
                 text, fid = unit
-                if text:
-                    self._render(text, first)
-                    first = False
-                if fid is not None and not self.stop.is_set():
-                    self._frames(np.zeros(0, "<i2"), flush=True)
-                    self._emit(
-                        {
-                            "type": "tts.flushed",
-                            "ctx": self.ctx,
-                            "id": fid,
-                            "audio_ms": round(self.samples * 1000 / RATE),
-                        }
-                    )
+                try:
+                    if text:
+                        self._render(text, first)
+                        first = False
+                    if fid is not None and not self.stop.is_set():
+                        self._frames(np.zeros(0, "<i2"), flush=True)
+                        self._emit(
+                            {
+                                "type": "tts.flushed",
+                                "ctx": self.ctx,
+                                "id": fid,
+                                "audio_ms": round(self.samples * 1000 / RATE),
+                            }
+                        )
+                finally:
+                    with self._cv:
+                        self._busy = False
             if not self.stop.is_set():
                 self._frames(np.zeros(0, "<i2"), flush=True)
                 audio_ms = round(self.samples * 1000 / RATE)

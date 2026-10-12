@@ -9,6 +9,11 @@ CUDA context are shared (why both lanes live in one process).
 Jobs are plain callables run on the worker; the caller awaits an
 ``asyncio.Future``. Callers coalesce their own partials (one pending per
 session), so the queue stays bounded by sessions x 3.
+
+A job that must be withdrawn *only if it has not started* (a queued partial,
+once the final is due) carries a :class:`Ticket`: the worker claims it before
+running ``fn``, and ``Ticket.cancel()`` succeeds only while nobody has. So a
+cancelled job never runs, and a job that did start is never half-withdrawn.
 """
 
 from __future__ import annotations
@@ -26,6 +31,34 @@ PRIO_PARTIAL = 2
 _STOP = object()
 
 
+class Ticket:
+    """Claim token shared by a submitter and the worker (thread-safe)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = "queued"  # queued -> running | cancelled
+
+    @property
+    def cancelled(self) -> bool:
+        return self._state == "cancelled"
+
+    def start(self) -> bool:
+        """Worker side: claim the job. False when it was cancelled first."""
+        with self._lock:
+            if self._state == "cancelled":
+                return False
+            self._state = "running"
+            return True
+
+    def cancel(self) -> bool:
+        """Submitter side: True when the job was withdrawn before it started."""
+        with self._lock:
+            if self._state != "queued":
+                return self._state == "cancelled"
+            self._state = "cancelled"
+            return True
+
+
 class SttLane:
     def __init__(self, name: str = "sf-stt-lane") -> None:
         self._q: queue.PriorityQueue[tuple[int, int, Any]] = queue.PriorityQueue()
@@ -33,10 +66,12 @@ class SttLane:
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
-    def submit(self, prio: int, fn: Callable[[], Any]) -> asyncio.Future[Any]:
+    def submit(
+        self, prio: int, fn: Callable[[], Any], ticket: Ticket | None = None
+    ) -> asyncio.Future[Any]:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        self._q.put((prio, next(self._seq), (fn, fut, loop)))
+        self._q.put((prio, next(self._seq), (fn, fut, loop, ticket)))
         return fut
 
     def depth(self) -> int:
@@ -51,8 +86,11 @@ class SttLane:
             _prio, _n, item = self._q.get()
             if item is _STOP:
                 return
-            fn, fut, loop = item
+            fn, fut, loop, ticket = item
             if fut.cancelled():
+                continue
+            if ticket is not None and not ticket.start():
+                loop.call_soon_threadsafe(fut.cancel)  # withdrawn: never run, never hang
                 continue
             try:
                 result = fn()
