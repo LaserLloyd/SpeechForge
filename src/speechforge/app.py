@@ -50,7 +50,7 @@ from speechforge.audio import (
     pcm16_to_float,
     read_wav,
     reference_clip,
-    resample_linear,
+    resample_poly,
     streaming_wav_header,
     wav_bytes,
 )
@@ -301,7 +301,8 @@ def create_app(
             raise TooLarge(f"file is larger than {max_body} bytes")
         audio, rate = read_wav(data)
         if rate != STT_SAMPLE_RATE:
-            audio = resample_linear(audio, rate, STT_SAMPLE_RATE)
+            # band-limited: a 44.1/48 kHz upload would otherwise alias into the speech band
+            audio = await asyncio.to_thread(resample_poly, audio, rate, STT_SAMPLE_RATE)
         result = await _transcribe(audio)
         if response_format == "text":
             return Response(result["text"], media_type="text/plain")

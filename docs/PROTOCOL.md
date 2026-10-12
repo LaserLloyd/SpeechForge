@@ -63,7 +63,7 @@ offset size field
 | `stt.reset` | -- | drop the open utterance |
 | `mark` | `turn_id` | stamps later `eou` frames |
 | `tts.open` | `ctx`, `gen`, `voice:"sha256:<hex>"`, `seed?`, `first_chunk_tokens?`, `turn_id?`, `speculative?`, `style?` | 1 active + 1 queued per session (a third is `busy`); the queued ctx starts when the active one ends (`tts.done`, an error, or a cancel) |
-| `tts.text` | `ctx`, `text`, `final?` | a unit is rendered when the buffer ends `. ! ? ; :`, on `final:true`, `tts.flush` or `tts.close`. At most `limits.max_text` (2000) characters per ctx in total (`too_long` past it); open a second ctx for more |
+| `tts.text` | `ctx`, `text`, `final?` | a unit is rendered when the buffer ends a sentence (`. ! ?`; not after a bare decimal point or a common abbreviation; `;` and `:` do not cut), on `final:true`, `tts.flush` or `tts.close`. At most `limits.max_text` (2000) characters per ctx in total (`too_long` past it); open a second ctx for more |
 | `tts.flush` | `ctx`, `id` | render the buffer now -> `tts.flushed{id}` |
 | `tts.close` | `ctx` | no more text -> `tts.done` after the audio |
 | `tts.pause` / `tts.resume` | `ctx` | false interruption: production stops at the next step while paused; the default played clock freezes |

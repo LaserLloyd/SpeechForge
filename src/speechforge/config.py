@@ -196,7 +196,11 @@ class TtsConfig(_Section):
     chunk_tokens: int = Field(25, ge=4, le=200)
     left_context: int = Field(8, ge=0, le=50)
     lookahead_tokens: int = Field(3, ge=0, le=10)
-    prompt_s: float = Field(4.0, ge=1.0, le=10.0)
+    #: Seconds of the reference the decoder is conditioned on (the prompt tokens and
+    #: speaker features; the LM's ``cond_emb`` is never sliced). Measured 2026-10-12
+    #: (S31): 10 s costs nothing over 4 s on the CUDA decoder and raises speaker
+    #: similarity by ~0.03 ECAPA cosine. The add-on's profiles carry 10 s.
+    prompt_s: float = Field(10.0, ge=1.0, le=10.0)
     temperature: float = Field(0.8, ge=0.0, le=2.0)
     top_k: int = Field(1000, ge=1)
     top_p: float = Field(0.95, gt=0.0, le=1.0)

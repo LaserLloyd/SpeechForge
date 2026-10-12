@@ -422,3 +422,55 @@ Both floors are host configuration (`config.yaml` `eou:`). Lowering `min_silence
 latency one-for-one and lets pauses of that length through again; this clip set only says
 where 400, 700 and 1000 ms land, not where human hesitation sits between them. The add-on's
 false-EOT gate (ADDON-ENGINE §7) should be run against this table before the floor is moved.
+
+## Voice quality: chunking, precision and prompt (2026-10-12)
+
+The owner reported uneven cadence and blips in the cloned voice. Thirteen variants of the
+streaming TTS path were rendered from the same profile on an idle RTX 5090 under a probe lease
+(the live card was not touched): 6 lines x 2 seeds each, the token list banked per seed and
+replayed at the live LM pace so decoder-only variants decode identical tokens. Metrics: envelope
+dip at each chunk seam against the median envelope around it (and at random control positions);
+the mean absolute log-mel difference 20 ms before and after a seam; WeSpeaker ECAPA cosine
+similarity between renders (no reference clip exists on the host, so similarity is
+render-to-render); decode ms per chunk; simulated playout gaps. Full tables and WAVs live with
+the private run data; the figures that matter:
+
+| Variant | Seam dip, median (control) | Spectral jump, seam (control) | Similarity to the whole render, same tokens | Decode p50 ms | TTFA p50 ms |
+| --- | --- | --- | --- | --- | --- |
+| A live (fp16, first 10, chunk 25, left 8, look 3, prompt 4 s, 20 ms fade) | -3.4 dB (-2.0) | 1.76 (1.92) | 0.909 | 75 | 244 |
+| A repeated (decoder-noise floor) | -6.6 dB (-1.9) | 1.78 (1.93) | 0.904 | 71 | 264 |
+| B whole sentence, one decode | - (-2.0) | - (1.96) | 1 by definition; 0.906 between seeds | 92 (one) | - |
+| D live, fp32 | -4.8 dB (-2.1) | 2.20 (2.00) | 0.902 | 85 | 440 |
+| E prompt 10 s | -2.9 dB (-2.5) | 1.86 (1.96) | **0.934** | 74 | 254 |
+| F left 16 / lookahead 6 (64 bucket) | -3.7 dB (-2.5) | 1.87 (1.92) | 0.909 | 82 (p95 485) | 300 |
+| G 50 ms crossfade | -2.6 dB (-2.5) | 1.86 (1.93) | 0.910 | 75 | 254 |
+| H phase-aligned seams | -3.3 dB (-2.5) | 1.86 (1.94) | 0.907 | 74 | 254 |
+| I temperature 0.6, repetition 1.05 | -6.5 dB (-2.5) | 2.04 (1.91) | - (different tokens) | 76 | 253 |
+| J E+F+G+H | -3.3 dB (-2.7) | 2.07 (1.96) | 0.938 | 84 (p95 529) | 294 |
+
+Readings:
+
+* **Seams are not the blips.** The seam dip in the live configuration is within 0.2 dB (median)
+  of the whole render at the same instants; only 1 of 59 seams was 10 dB deeper. The spectral jump
+  at seams is *below* the jump at random positions. The decoder's own noise (A vs A repeated,
+  identical tokens) moves these statistics more than any variant does.
+* **Crossfade changes nothing.** 50 ms and phase alignment are inside noise; the chunks are
+  essentially uncorrelated at the seam (cross-correlation 0.05), so a lag search finds nothing.
+* **fp16 = fp32** on every metric (similarity 0.912 between B and C against 0.901-0.906 between
+  seeds of either). fp16's LM is not bit-reproducible (the same seed gave 146-148 tokens);
+  fp32's is. fp32 costs 2x LM time (TTFA 440 vs 244 ms).
+* **prompt 10 s is free and better**: similarity 0.909 -> 0.934 (ceiling 0.941), decode and
+  TTFA unchanged. It is now the default (S31).
+* **The 64-token bucket is not worth it**: every switch between the 40 and 64 shapes costs a
+  300-530 ms re-shape; F gapped in 9 of 12 simulated playouts, J in 4 of 12.
+* **Calm sampling** (temperature 0.6, repetition 1.05) gives 6.5 % more tokens and more silence
+  tokens per sentence; not adopted without listening.
+* **LM stall**: in the probe's first renders the LM ran 46-65 ms per token beside the decoder
+  (7.6 ms alone), the planner fell to 6-token chunks and the simulated client heard ~12 gaps per
+  sentence. It stopped after the engine had rendered ~7 lines, i.e. a cold-engine effect the live
+  host's warm-up covers (its `tts_step_ms` histogram: 98 % of steps under 20 ms, max 100 ms).
+  Recorded for the next time cadence is questioned.
+
+Live bench after the restart that evening (`speechforge bench -n 10` with the owner's profile,
+before S31): TTFA p50 191 / p90 392 ms, RTF p50 0.25, cancel p99 8.8 ms, partial lag p90 94 ms,
+round-trip WER 2.5 %, end-of-turn 690 ms (the S26 floor).

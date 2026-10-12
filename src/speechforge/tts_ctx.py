@@ -1,10 +1,14 @@
 """One TTS context (``tts.open`` ... ``tts.done``) and its producer thread
 (SPEC-speechforge §4.3, §4.4, §5.4, §5.5).
 
-* **Units.** Text accumulates; a unit is cut when the buffer ends a sentence or
-  clause (``. ! ? ; :``), on ``tts.text{final:true}``, ``tts.flush`` and
-  ``tts.close``. Phase 1 renders unit by unit (the box splitter already sends
-  clauses); a unit is one pipelined Chatterbox call, so its audio is exactly
+* **Units.** Text accumulates; a unit is cut when the buffer ends a sentence
+  (``. ! ?``, see :func:`unit_ready`: not after a bare decimal point or a common
+  abbreviation), on ``tts.text{final:true}``, ``tts.flush`` and ``tts.close``.
+  ``;`` and ``:`` no longer cut (S31): every unit is a fresh LM call with no
+  prosodic memory of the last one, so clause-level units read as uneven cadence
+  and each one appends 120 ms of trailing silence. Phase 1 renders unit by unit
+  (the box splitter already sends clauses, with ``final`` where it wants a cut);
+  a unit is one pipelined Chatterbox call, so its audio is exactly
   ``(tokens + 3) x 960`` samples and its length is known as soon as the LM
   finishes -- which is when ``tts.words`` goes out, ahead of the audio.
 * **Frames.** 40 ms (960 samples @ 24 kHz) binary frames, ``pts`` = samples
@@ -38,8 +42,39 @@ from speechforge.metrics import METRICS, RATIO_BUCKETS
 RATE = 24000
 FRAME = 960
 TOKEN_MS = 40
-_UNIT_END = re.compile(r"[.!?;:][\"')\]]*\s*$")
+_SENT_END = re.compile(r"[.!?][\"')\]]*\s*$")
+_LAST_WORD = re.compile(r"(\S+)\.[\"')\]]*\s*$")
 _WORD = re.compile(r"\S+")
+#: A full stop after one of these is not a sentence end ("Dr. Who", "e.g. this").
+_ABBREVIATIONS = frozenset(
+    ["mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "e.g", "i.e", "inc", "ltd", "mt"]
+)
+
+
+def unit_ready(buffer: str) -> bool:
+    """Does ``buffer`` end a sentence worth rendering on its own?
+
+    True when it ends in ``. ! ?`` (closing quotes and brackets allowed), except
+    a full stop that is probably not one: right after a digit with nothing
+    following yet (``"costs 3."`` may continue ``"5 dollars"``), after a known
+    abbreviation, or after a single letter (an initial). Those wait for more
+    text; ``final``, ``tts.flush`` and ``tts.close`` still cut them.
+    """
+    if not _SENT_END.search(buffer):
+        return False
+    stripped = buffer.rstrip()
+    if not stripped.endswith("."):
+        return True  # ! or ? (or a quote/bracket after them)
+    m = _LAST_WORD.search(buffer)
+    if m is None:
+        return True
+    word = m.group(1)
+    if word[-1:].isdigit() and buffer == stripped:
+        return False  # "3." with no space yet: likely a decimal point
+    bare = word.lstrip("\"'([").lower().rstrip(".")
+    if bare in _ABBREVIATIONS:
+        return False
+    return not (len(bare) == 1 and bare.isalpha() and word[:1].isupper())
 
 
 def estimate_words(text: str, start_ms: int, dur_ms: int) -> list[list[Any]]:
@@ -124,7 +159,7 @@ class TtsContext:
                 self.t_first_text = self._clock()
             self.text_chars += len(text)
             self._buffer += text
-            if final or _UNIT_END.search(self._buffer):
+            if final or unit_ready(self._buffer):
                 self._cut(None)
             self._cv.notify_all()
 

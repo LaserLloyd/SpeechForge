@@ -52,6 +52,9 @@ class UpgradeLimiter:
         if len(q) >= self.per_min:
             return False
         q.append(now)
+        if len(self._hits) > 256:  # forget addresses whose minute has passed
+            for key in [k for k, v in self._hits.items() if not v or now - v[-1] > 60]:
+                del self._hits[key]
         return True
 
 

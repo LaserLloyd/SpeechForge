@@ -33,7 +33,7 @@ from speechforge.protocol import (
     unpack_audio,
 )
 from speechforge.stt_stream import RATE, RollingStt
-from speechforge.tts_ctx import estimate_words
+from speechforge.tts_ctx import estimate_words, unit_ready
 
 
 # --------------------------------------------------------------------- codec
@@ -830,3 +830,18 @@ def test_reference_clip_helper_resamples_then_prepares():
     assert Config(data_dir=".").voices.prepare_reference is True
     with pytest.raises(ValueError):
         Config(data_dir=".", voices={"reference_target_dbfs": -5})
+
+
+def test_unit_ready_cuts_sentences_not_clauses_or_abbreviations():
+    assert unit_ready("Sure, I can help.")
+    assert unit_ready("Really?")
+    assert unit_ready('He said "wait!" ')
+    assert unit_ready("It costs three dollars. ")
+    assert unit_ready("It costs 3. ")  # a space after the stop: the sentence ended on a number
+    assert not unit_ready("It costs 3.")  # no space yet: probably 3.5
+    assert not unit_ready("Ask Dr.")
+    assert not unit_ready("See e.g.")
+    assert not unit_ready("Meet J.")
+    assert not unit_ready("First this; then that")  # clauses stay in one unit
+    assert not unit_ready("Here is the plan:")
+    assert not unit_ready("no terminator")

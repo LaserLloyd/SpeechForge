@@ -118,14 +118,16 @@ class Session:
 
     def post(self, msg: dict[str, Any]) -> None:
         """Thread-safe send (TTS producer threads)."""
-        if self.loop is not None:
+        loop = self.loop
+        if loop is not None and not loop.is_closed() and self._send_text is not None:
             with contextlib.suppress(RuntimeError):
-                self.loop.call_soon_threadsafe(self._spawn, self.send(msg))
+                loop.call_soon_threadsafe(self._spawn, self.send(msg))
 
     def post_bin(self, data: bytes) -> None:
-        if self.loop is not None:
+        loop = self.loop
+        if loop is not None and not loop.is_closed() and self._send_bytes is not None:
             with contextlib.suppress(RuntimeError):
-                self.loop.call_soon_threadsafe(self._spawn, self.send_bin(data))
+                loop.call_soon_threadsafe(self._spawn, self.send_bin(data))
 
     def _spawn(self, coro: Awaitable[Any]) -> None:
         task = asyncio.ensure_future(coro)
@@ -478,6 +480,13 @@ class Session:
         sp = self.m.residency.speaker
         if sp is None:
             await self.error("not_ready", "models unloaded", ctx=ctx_id, fatal=False)
+            return
+        # The voice load awaited a thread: re-check what may have changed meanwhile.
+        if ctx_id in self.ctxs and not self.ctxs[ctx_id].done:
+            await self.error("bad_frame", "ctx is already open", ctx=ctx_id)
+            return
+        if len(self._active()) >= self.cfg.max_contexts or self.m.vacating:
+            await self.error("busy", "one active and one queued context per session", ctx=ctx_id)
             return
         fct = msg.get("first_chunk_tokens")
         seed = msg.get("seed")

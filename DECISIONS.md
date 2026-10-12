@@ -514,3 +514,31 @@ the peak cap (the gain is a pure scale, so the dynamics are the speaker's); cutt
 length (the engine knows what it uses; Qwen3 and dots cut their own); loudness (LUFS)
 weighting or spectral EQ (no evidence they help, and they cannot be undone); refusing a clip on
 a warning (the voice is still built, and the 3-30 s limit is the only hard gate).
+
+## S31 -- Voice quality: the decoder reads the whole 10 s prompt; units are sentences
+
+**Decision.** `tts.prompt_s` defaults to 10 s (was 4): the decoder is conditioned on everything
+the profile carries (the add-on's profiles are exactly 10 s; `cond_emb` for the LM was never
+sliced). A TTS unit is cut at a sentence end (`. ! ?`) and no longer at `;` or `:`; a full stop
+right after a digit with nothing following, after a common abbreviation or after an initial waits
+for more text (`tts_ctx.unit_ready`). `final`, `tts.flush` and `tts.close` cut as before. Left
+context, lookahead, the 20 ms seam crossfade, the 40-token decoder bucket, fp16 and the sampling
+knobs stay as they were.
+
+**Why.** Measured on 2026-10-12 (docs/BENCHMARKS.md, "Voice quality: chunking, precision and
+prompt"): 13 variants x 6 lines x 2 seeds on an idle RTX 5090 under a probe lease, with
+objective seam and similarity metrics, after the owner reported uneven cadence and blips.
+The seams are not the blips: the envelope dip at a chunk seam is within 0.2 dB (median) of the
+same instant in a whole-sentence render, the spectral jump at seams is below that at random
+positions, and neither a 50 ms crossfade nor a phase-aligned one changes any metric. fp16 and
+fp32 are indistinguishable (ECAPA cosine 0.91 between them, the same as two seeds of either).
+The 10 s prompt costs nothing (decode 74 vs 75 ms per chunk, TTFA 254 vs 244 ms, inside noise)
+and raises speaker similarity to the whole render from 0.909 to 0.934 against a decoder-noise
+ceiling of 0.941. A longer left context (16 / lookahead 6) forces the 64-token decoder bucket,
+and every switch between the 40 and 64 shapes costs a 300-530 ms re-shape: 9 of 12 sentences
+then had a playout gap. What does move cadence is structural: every unit is an independent LM
+call with its own prosody and a 120 ms silent tail, so cutting at `;` and `:` (and at a decimal
+point or "Dr.") produced fragments that read as uneven pacing. The only other cadence risk the
+measurement found was the LM slowing from 8 to 46-65 ms per token while the decoder ran, in
+the probe's first renders on a cold engine; the live host warms every LM worker at load and its
+`tts_step_ms` histogram shows 98 % of steps under 20 ms, so it is recorded here, not acted on.
