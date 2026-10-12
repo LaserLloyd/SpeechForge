@@ -346,3 +346,127 @@ async def test_drain_stops_a_stuck_stream(config, studioforge, clock):
     await res._unload("test", cooldown_s=0)
     await asyncio.wait_for(task, 2)
     assert res.state == "unloaded"
+
+
+# --------------------------------------------------------------------- relink (S29)
+class Told:
+    """A session-manager stand-in that records what the residency announces."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    async def on_lease_state(self, state, deadline_s=None):
+        self.events.append(("lease", state))
+
+    async def before_unload(self, reason, timeout_s):
+        self.events.append(("before_unload", reason))
+
+    async def after_unload(self, code, retry_after_s):
+        self.events.append(("after_unload", code))
+
+
+async def unleased(config, studioforge, clock):
+    """A ready server that loaded without a lease because StudioForge was down."""
+    studioforge.down = True
+    res, _, tts = make(config, studioforge, clock)
+    told = Told()
+    res.add_listener(told)
+    res.kick()
+    await settle(res)
+    assert res.state == "ready" and res.lease is None
+    told.events.clear()
+    return res, told, tts
+
+
+def lease_posts(studioforge) -> int:
+    return len([r for r in studioforge.requests if (r[0], r[1]) == ("POST", "/api/leases")])
+
+
+async def test_relink_grants_when_studioforge_returns(config, studioforge, clock):
+    res, told, _ = await unleased(config, studioforge, clock)
+    studioforge.down = False
+    clock.advance(31)
+    await res.tick()
+    assert res.state == "ready" and res.lease is not None
+    assert list(studioforge.leases) == [res.lease.lease_id]
+    assert studioforge.leases[res.lease.lease_id]["devices"] == [3]
+    assert told.events == [("lease", "held")]
+    st = res.status()
+    assert st["lease"]["id"] == res.lease.lease_id and st["unleased_reason"] is None
+    # From here on it is an ordinary holder: touched, released on unload.
+    async with res.use():
+        pass
+    clock.advance(31)
+    await res.tick()
+    assert [r for r in studioforge.requests if r[1].endswith("/touch")]
+    await res._unload("test", cooldown_s=0)
+    assert studioforge.leases == {}
+
+
+async def test_relink_refusal_gives_way_like_a_vacate(config, studioforge, clock):
+    res, told, tts = await unleased(config, studioforge, clock)
+    studioforge.down = False
+    studioforge.refuse = (409, "lease_conflict", None)
+    clock.advance(31)
+    await res.tick()
+    await settle(res)
+    assert told.events == [
+        ("before_unload", "vacated"),
+        ("after_unload", "vacated"),
+    ]
+    assert res.state == "cooldown" and tts.closed and studioforge.leases == {}
+    assert res.counters["vacates"] == 1
+    with pytest.raises(Unavailable) as exc:
+        res.require()
+    assert exc.value.code == "gpu_vacated" and exc.value.retry_after_s == pytest.approx(120)
+
+
+async def test_relink_still_unreachable_waits_for_the_next_interval(config, studioforge, clock):
+    res, told, _ = await unleased(config, studioforge, clock)
+    reason = res.unleased_reason
+    clock.advance(20)
+    await res.tick()
+    assert lease_posts(studioforge) == 0  # fake records nothing while down; interval not up
+    clock.advance(11)
+    await res.tick()  # 31 s: tries, still down
+    assert res.state == "ready" and res.lease is None and res.unleased_reason == reason
+    assert told.events == []
+    # Back up, but only 10 s after the failed attempt: no second try yet.
+    studioforge.down = False
+    clock.advance(10)
+    await res.tick()
+    assert lease_posts(studioforge) == 0 and res.lease is None
+    clock.advance(21)
+    await res.tick()
+    assert lease_posts(studioforge) == 1 and res.lease is not None
+
+
+async def test_relink_interval_is_configurable(config, studioforge, clock):
+    config.studioforge.relink_s = 5
+    res, _, _ = await unleased(config, studioforge, clock)
+    studioforge.down = False
+    clock.advance(6)
+    await res.tick()
+    assert res.lease is not None
+
+
+async def test_relink_clears_a_stale_lease_of_our_own_holder(config, studioforge, clock):
+    res, told, _ = await unleased(config, studioforge, clock)
+    studioforge.leases = {"old": {"id": "old", "devices": [3], "holder": "speechforge"}}
+    studioforge.down = False
+    clock.advance(31)
+    await res.tick()
+    assert res.lease is not None and res.lease.lease_id != "old"
+    assert list(studioforge.leases) == [res.lease.lease_id]
+    assert told.events == [("lease", "held")]
+
+
+async def test_lease_mode_off_never_relinks(config, studioforge, clock):
+    res, _, _ = make(config, studioforge, clock, lease=False)
+    res.kick()
+    await settle(res)
+    assert res.unleased_reason == "lease_mode off"
+    async with res.use():  # busy, so the idle clock cannot unload it first
+        clock.advance(10_000)
+        await res.tick()
+        assert res.state == "ready" and res.lease is None and studioforge.requests == []

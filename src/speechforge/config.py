@@ -314,6 +314,9 @@ class StudioForgeConfig(_Section):
     refusal_cooldown_s: float = Field(30.0, ge=1)
     touch_interval_s: float = Field(30.0, ge=1)
     vacate_cooldown_s: float = Field(180.0, ge=0)
+    #: A server that loaded unleased (StudioForge was unreachable) asks for the lease
+    #: again this often; a refusal then makes it give the card back (S29).
+    relink_s: float = Field(30.0, ge=5, le=600)
 
     @field_validator("holder")
     @classmethod

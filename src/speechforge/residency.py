@@ -21,6 +21,10 @@ Promises:
 * **Sessions keep it resident.** No idle unload while a session is open; the
   idle clock starts when the last one closes. The lease is touched while
   sessions are open or requests ran.
+* **Unleased is not exempt** (S29): a server that loaded without a lease because
+  StudioForge was unreachable retries the lease every ``studioforge.relink_s``.
+  Granted -> it holds one from then on (``held``). Refused -> the card is
+  committed to someone else, so it gives way exactly like a vacate would.
 * **Vacate** (D56): the session manager announces ``state: vacating``, lets
   current contexts finish (bounded), then unload, release, cool down.
 """
@@ -163,6 +167,7 @@ class Residency:
         self._stops: set[threading.Event] = set()
         self._last_used = clock()
         self._last_touch = clock()
+        self._last_relink = clock()
         self._active_since_touch = False
         self._bringup: asyncio.Task[None] | None = None
         self._unload_task: asyncio.Task[None] | None = None
@@ -357,6 +362,8 @@ class Residency:
             log.info("idle for %.0f s; unloading and releasing the card", now - self._last_used)
             await self._unload("idle", cooldown_s=0)
             return
+        if await self._maybe_relink(now):
+            return
         await self._maybe_touch(now)
         live = self.gpu_live()
         if "vram_used_mib" in live:
@@ -521,7 +528,7 @@ class Residency:
         METRICS.set("load_ms", self.load_ms)
         live = self.gpu_live()
         self.vram_at_load = live.get("vram_used_mib")
-        self._last_used = self._last_touch = self._clock()
+        self._last_used = self._last_touch = self._last_relink = self._clock()
         log.info("speech models ready", extra={"device": device, "ms": self.load_ms})
         if self._vacate_pending:
             self._vacate_pending = False
@@ -600,6 +607,64 @@ class Residency:
         lease, self.lease = self.lease, None
         if lease is not None and self.lease_client is not None:
             await self.lease_client.release(lease.lease_id)
+
+    def _unloading(self) -> bool:
+        return self._unload_task is not None and not self._unload_task.done()
+
+    async def _maybe_relink(self, now: float) -> bool:
+        """Unleased (StudioForge was unreachable at load): try for the lease again.
+
+        True when the server is giving way (the caller stops ticking).
+        """
+        client = self.lease_client
+        cfg = self.config.studioforge
+        if (
+            client is None
+            or self.lease is not None
+            or self.unleased_reason is None
+            or self.device is None
+            or self._unloading()
+            or now - self._last_relink < cfg.relink_s
+        ):
+            return False
+        self._last_relink = now
+        device = self.device
+        outcome = await client.acquire(device)
+        # A lease under our own holder (persisted by StudioForge across its restart, left
+        # by a crash of ours) reads as a conflict; we hold none here, so it is stale.
+        if isinstance(outcome, Refused) and await client.release_stale():
+            outcome = await client.acquire(device)
+        if self.state != "ready" or self._unloading():
+            # Something else took over while we were asking; hand a fresh grant back.
+            if isinstance(outcome, Granted):
+                await client.release(outcome.lease_id)
+            return False
+        if isinstance(outcome, Granted):
+            self.lease = outcome
+            self.unleased_reason = None
+            self._last_touch = now
+            METRICS.inc("lease_events_total", event="relink")
+            log.info("StudioForge is reachable again; now holding a lease on CUDA %d", device)
+            await self._notify("on_lease_state", "held")
+            return False
+        if isinstance(outcome, Refused):
+            self.counters["vacates"] += 1
+            METRICS.inc("lease_events_total", event="relink_refused")
+            log.info(
+                "StudioForge is back and refused the lease (%s); giving the card back",
+                outcome.code,
+                extra={"state": self.state},
+            )
+            self._schedule_unload(
+                "vacated",
+                cooldown_s=cfg.vacate_cooldown_s,
+                code="gpu_vacated",
+                message="StudioForge needs the card; use a local engine",
+                announce=True,
+            )
+            return True
+        log.debug("StudioForge still unreachable (%s); staying unleased", outcome.reason)
+        return False
 
     async def _maybe_touch(self, now: float) -> None:
         if self.lease is None or self.lease_client is None:
