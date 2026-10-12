@@ -405,3 +405,24 @@ models unload -- which is exactly when a lease-returning tenant (S3) must give t
 **Default `gpu.shared_arena: false`**; the code stays behind the flag for a deployment that never
 unloads (or that exits the process to unload). The cold-load answer remains the Open list in
 docs/BENCHMARKS.md.
+
+## S26 -- Smart Turn waits out a mid-sentence pause (2026-10-12)
+
+**Decision.** The server owns the silence floor before Smart Turn is consulted. `eou.min_silence_ms`
+(provisional 300 ms) is the least silence after which an `eou` verdict is produced, and the client's
+`stt.config eou.min_pause_ms` is only a request: the effective trigger is `max(requested, floor)`,
+so a client can raise it but never lower it. When the latest partial does not end in `. ? !` the
+pause is a candidate mid-sentence breath and the longer `eou.unpunctuated_silence_ms` (provisional
+800 ms) applies instead. The check re-evaluates on every VAD window, so a partial that catches up
+with a full stop during the pause releases it early; the verdict is still sent once per pause and
+a pause cut short by speech sends nothing. The `eou` and `stt.final` frames and the `_pause`
+event are unchanged (`pause_ms` is the measured pause when the event fires); only when the event
+fires moves. Both numbers are provisional and are to be set from the live measurement.
+
+**Why.** Measured live on 2026-10-12 by the add-on: on medium and long utterances (8 s and up) a
+natural pause inside a sentence got a high Smart Turn `p` at the 150 ms default, the box took it as
+the end of the turn, and the model started answering half a question. Smart Turn sees only the
+last 8 s of audio and scores acoustic cues, so at 150 ms it cannot tell a breath from a stop; the
+ASR's own punctuation can. A clean full stop followed by ~300 ms of silence still gets its verdict
+in well under a second, which is what the fast path needs. Keeping the floor on the server means no
+client configuration can bring the false end of turn back.

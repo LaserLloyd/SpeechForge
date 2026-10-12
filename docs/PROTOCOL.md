@@ -58,7 +58,7 @@ offset size field
 | Frame | Fields | Notes |
 | --- | --- | --- |
 | `hello` | `proto:"sf.1"`, `client:{name,version}`, `resume?:{session, token}`, `caps` | first frame |
-| `stt.config` | `lang:"en"`, `partial_ms` (160), `eou:{enabled, min_pause_ms:150}`, `hotwords?` (<= 64) | re-sendable |
+| `stt.config` | `lang:"en"`, `partial_ms` (160), `eou:{enabled, min_pause_ms:150}`, `hotwords?` (<= 64) | re-sendable. `eou.min_pause_ms` is a request: the server's configured silence floors (`eou.min_silence_ms`, `eou.unpunctuated_silence_ms`) win, so the client can raise the trigger but never lower it |
 | `stt.flush` | `id?` | decode now -> `stt.final{id}`; the next utterance starts at its `upto` |
 | `stt.reset` | -- | drop the open utterance |
 | `mark` | `turn_id` | stamps later `eou` frames |
@@ -82,7 +82,7 @@ offset size field
 | `state` | `lease: held \| unleased \| vacating \| lost`, `deadline_s?`, `models?` -- `vacating`: finish the current context, open no new one |
 | `stt.vad` | `speech`, `at` -- the rig's Silero, informational |
 | `stt.partial` | `committed`, `tail`, `stable_words`, `punct_final`, `upto`, `lag_ms`, `ms` -- at most one per `partial_ms`, only when the text changed |
-| `eou` | `p`, `at` (pause start), `pause_ms`, `ms`, `turn_id` -- once per pause >= `min_pause_ms` |
+| `eou` | `p`, `at` (pause start), `pause_ms`, `ms`, `turn_id` -- once per pause, once the server's silence floor is reached (`eou.min_silence_ms` after a partial that ends a sentence, the longer `eou.unpunctuated_silence_ms` when the running partial does not; never below the client's `min_pause_ms`); cancelled if speech resumes first |
 | `stt.final` | `id?`, `text`, `words:[[w, start, end]]`, `upto`, `ms` |
 | `tts.started` | `ctx`, `ttfa_ms` (first text in -> first frame), `turn_id` |
 | `tts.words` | `ctx`, `words:[[w, start_ms, end_ms]]` (ctx audio clock), `unit_ms`, `estimated:true` -- sent when a unit's length is known, before its audio |
