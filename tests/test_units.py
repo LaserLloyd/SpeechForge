@@ -210,6 +210,30 @@ def test_log_redaction():
     assert tok not in line["msg"] and line["turn_id"] == "t9"
 
 
+def _asyncio_record(msg: str, exc: BaseException | None) -> logging.LogRecord:
+    info = (type(exc), exc, None) if exc is not None else None
+    return logging.LogRecord("asyncio", logging.ERROR, "f", 1, msg, (), info)
+
+
+def test_proactor_reset_noise_is_dropped_and_counted():
+    from speechforge.logsetup import ProactorResetFilter
+    from speechforge.metrics import METRICS
+
+    f = ProactorResetFilter()
+    cb = "Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)"
+    before = METRICS.counter("asyncio_conn_reset_total")
+    assert f.filter(_asyncio_record(cb, ConnectionResetError(10054, "reset"))) is False
+    assert f.filter(_asyncio_record(cb, ConnectionAbortedError())) is False
+    # anything else from asyncio -- or the same callback failing another way -- still logs
+    assert f.filter(_asyncio_record(cb, RuntimeError("real"))) is True
+    assert f.filter(_asyncio_record("Task exception was never retrieved", OSError())) is True
+    assert f.filter(_asyncio_record("Exception in callback x()", ConnectionResetError())) is True
+    assert f.filter(_asyncio_record(cb, None)) is True
+    other = logging.LogRecord("speechforge", logging.ERROR, "f", 1, cb, (), None)
+    assert f.filter(other) is True
+    assert METRICS.counter("asyncio_conn_reset_total") == before + 2
+
+
 # --------------------------------------------------------------------- rolling STT
 def _speech(n):
     return (0.3 * np.sin(np.arange(n) * 0.2) * 32767).astype("<i2")

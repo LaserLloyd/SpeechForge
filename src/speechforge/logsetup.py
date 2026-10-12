@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from speechforge.metrics import METRICS
+
 #: Values that look like a bearer/vacate token or an Authorization header.
 _REDACT = [
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"),
@@ -46,6 +48,28 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, ensure_ascii=False)
 
 
+class ProactorResetFilter(logging.Filter):
+    """Drop asyncio's "Exception in callback _ProactorBasePipeTransport.
+    _call_connection_lost" when the cause is the peer's reset.
+
+    On Windows a client that hangs up with a TCP reset makes the transport's
+    final ``socket.shutdown()`` raise ``ConnectionResetError``; CPython logs it
+    from the event loop's exception handler (nothing in this server raised it,
+    and nothing it could catch). Only that one callback with a reset/abort
+    error is dropped (and counted); every other asyncio record passes."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "asyncio" or not record.exc_info:
+            return True
+        exc = record.exc_info[1]
+        if not isinstance(exc, ConnectionResetError | ConnectionAbortedError):
+            return True
+        if "_call_connection_lost" not in record.getMessage():
+            return True
+        METRICS.inc("asyncio_conn_reset_total")
+        return False
+
+
 def setup(logs_dir: Path | None, *, to_file: bool) -> None:
     handlers: list[logging.Handler] = []
     console = logging.StreamHandler()
@@ -58,6 +82,8 @@ def setup(logs_dir: Path | None, *, to_file: bool) -> None:
         )
         fh.setFormatter(JsonFormatter())
         handlers.append(fh)
+    for handler in handlers:
+        handler.addFilter(ProactorResetFilter())
     logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
     import faulthandler
 
