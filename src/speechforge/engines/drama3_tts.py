@@ -27,12 +27,14 @@ process through the server's ``encode_reference_only`` task and the codes are
 cached; a codes-only file (the same container with ``vq_codes``) needs no
 encode at all. Every request sends ``options.references`` with the codes, so
 the server never re-encodes and the body is ~14 KB instead of ~800 KB. What
-remains is the backbone re-reading the reference rows on every request --
-measured 2026-10-15 at ~2.4 ms per row, i.e. ~55 ms per second of reference
-on top of ~110 ms for the text -- which is why ``max_ref_s`` is 6 s and why a
-voice KEPT from a short take (``take()``: generate with no reference, store
-the take's own codes) speaks in ~300-400 ms. Cutting that further needs a
-per-voice prefix cache inside the port's backbone (docs/ENGINES.md).
+remains is the backbone pre-filling the reference rows on every request, and
+how much that costs depends on the CUDA toolkit the port was BUILT with
+(S35): under CUDA 13.4 the router's top-k compiles into a per-row host loop
+(~2.4 ms per row, ~55 ms per second of reference); under CUDA 13.1 the same
+source pre-fills at ~0.15 ms per row, so a 12.6 s reference reaches first
+audio in ~130 ms and a 6 s one in ~100 ms, and seeds reproduce.
+``engine-setup`` builds with 13.1 when it finds it. ``take()`` keeps a voice
+the model improvised (generate with no reference, store the take's codes).
 
 Licences: the weights are under the Fish Audio Community License v1.0 (free for
 research, personal and non-commercial use, and for commercial use below
@@ -821,9 +823,49 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _run(argv: list[str], *, cwd: Path | None, log: Callable[[str], None]) -> None:
+def _run(argv: list[str], *, cwd: Path | None, log: Callable[[str], None],
+         env: dict[str, str] | None = None) -> None:
     log("$ " + " ".join(argv))
-    subprocess.run(argv, cwd=str(cwd) if cwd else None, check=True)
+    subprocess.run(argv, cwd=str(cwd) if cwd else None, check=True, env=env)
+
+
+#: The toolkit the port is built with decides the pre-fill speed (S35): CUDA
+#: 13.4's CUB has a top-k that the port calls once per row per layer from the
+#: host (~2.4 ms per prompt row); CUDA 13.1's CUB has none, the op falls back
+#: to one sort per layer, and pre-fill runs at ~0.15 ms per row.
+PREFERRED_CUDA = "13.1"
+
+
+def find_cuda_toolkit(version: str = PREFERRED_CUDA) -> Path | None:
+    """The CUDA toolkit root for ``version`` on this machine, or None."""
+    key = "CUDA_PATH_V" + version.replace(".", "_")
+    if os.environ.get(key):
+        root = Path(os.environ[key])
+        if root.is_dir():
+            return root
+    candidates = []
+    if sys.platform == "win32":
+        base = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
+        candidates.append(base / "NVIDIA GPU Computing Toolkit" / "CUDA" / f"v{version}")
+    else:
+        candidates += [Path(f"/usr/local/cuda-{version}"), Path(f"/opt/cuda-{version}")]
+    for root in candidates:
+        if (root / "bin").is_dir():
+            return root
+    return None
+
+
+def build_env(cuda_toolkit: Path | None) -> dict[str, str]:
+    """The environment for the port's build script: CMake picks the compiler
+    from ``CUDACXX`` (``CUDA_PATH`` alone is not enough, measured)."""
+    env = dict(os.environ)
+    if cuda_toolkit is not None:
+        nvcc = cuda_toolkit / "bin" / _exe_name("nvcc")
+        env["CUDACXX"] = str(nvcc)
+        env["CUDA_PATH"] = str(cuda_toolkit)
+        env["CUDAToolkit_ROOT"] = str(cuda_toolkit)
+        env["PATH"] = str(cuda_toolkit / "bin") + os.pathsep + env.get("PATH", "")
+    return env
 
 
 def setup(
@@ -832,6 +874,8 @@ def setup(
     root: Path | None = None,
     build: bool = True,
     install_model: bool = True,
+    cuda_toolkit: Path | None = None,
+    cuda_arch: str = "auto",
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """``speechforge engine-setup drama3``: the port's own setup, driven.
@@ -844,6 +888,8 @@ def setup(
     3. ``tools/model_manager_v2.py install <package> --models-root
        <models>/audiocpp`` -- the port downloads and places the GGUF.
 
+    The build uses CUDA 13.1 when it is installed (``cuda_toolkit`` names
+    another root; see ``PREFERRED_CUDA``) and says so when it is not.
     Prints what is missing (git, cmake, nvcc, Visual Studio Build Tools)
     instead of guessing. Returns the paths to put in ``config.yaml``.
     """
@@ -866,16 +912,26 @@ def setup(
         _run(["git", "fetch", "--depth", "1", "origin", AUDIOCPP_COMMIT], cwd=root, log=log)
         _run(["git", "checkout", "--quiet", AUDIOCPP_COMMIT], cwd=root, log=log)
 
+    toolkit = cuda_toolkit or (find_cuda_toolkit() if build else None)
     if build:
+        if toolkit is None:
+            log(f"note: CUDA {PREFERRED_CUDA} not found; building with the default toolkit. "
+                f"With CUDA 13.4 the port pre-fills at ~2.4 ms per prompt row instead of "
+                f"~0.15 (S35): cloned voices will start ~0.5-0.9 s late.")
+        else:
+            log(f"building with CUDA toolkit {toolkit}")
+        env = build_env(toolkit)
         if sys.platform == "win32":
             for target in ("audiocpp_server", "audiocpp_cli"):
                 _run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                       str(root / "scripts" / "build_windows.ps1"),
                       "-Preset", "windows-cuda-release", "-ModelSet", "custom",
-                      "-Models", "fish_drama3", "-Target", target], cwd=root, log=log)
+                      "-Models", "fish_drama3", "-CudaArchitectures", str(cuda_arch),
+                      "-Target", target], cwd=root, log=log, env=env)
         else:
             _run(["bash", str(root / "scripts" / "build_linux.sh"), "--preset",
-                  "linux-cuda-release", "--models", "fish_drama3"], cwd=root, log=log)
+                  "linux-cuda-release", "--models", "fish_drama3"], cwd=root, log=log,
+                 env=env)
 
     models_root = Path(config.models_dir) / "audiocpp"
     if install_model:
@@ -899,6 +955,7 @@ def setup(
     out = {
         "root": str(root),
         "commit": head,
+        "cuda_toolkit": str(toolkit) if toolkit else "",
         "server_exe": str(exe),
         "server_exe_exists": exe.is_file(),
         "model_path": str(model),

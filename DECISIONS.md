@@ -598,3 +598,20 @@ built-in or seed-stable voice: with no reference it improvises one per take.
 - *Not done here:* the per-voice backbone prefix cache in the port (saved state after the
   reference rows, suffix-only pre-fill) is the one change that reaches ~200 ms with long
   references; it is a C++ patch to audio.cpp, documented as the lead in ENGINES.md.
+
+## S35 -- Build the port with CUDA 13.1: the toolkit's top-k was the per-row cost (2026-10-15)
+
+**Context.** S34 attributed the cloned-voice latency to the backbone pre-filling every
+reference row at ~2.4 ms per row. A profile (`nsys`) showed the GPU idle most of that time:
+under CUDA 13.4 the port's MoE router (`ggml_top_k`) compiles to CUB's top-k, which the port
+calls once per row per layer from the host -- 62.6k launches for one 371-row pre-fill.
+
+**Decision.** `engine-setup` builds the port with the CUDA 13.1 toolkit when it is installed
+(`CUDACXX` + `CUDA_PATH` + `CUDAToolkit_ROOT`; CMake picks the compiler from `CUDACXX`, the
+others are not enough), says so when it is not, and accepts `--cuda-toolkit` / `--cuda-arch`.
+Same source, no patch: pre-fill 0.15 ms per row, a 12.6 s reference to first audio in
+~130 ms, 6 s in ~100 ms, seeds reproducible. The host's config points at the 13.1 build.
+`max_ref_s` stays at 6 s (the knee is now similarity, not latency; raise it when the
+listening test says so). The change to offer the port upstream is `ggml_argsort_top_k` at
+`backbone.cpp:413`, which would make every toolkit equally fast; the per-voice prefix cache
+of S34 is now worth ~60-90 ms and was not written.

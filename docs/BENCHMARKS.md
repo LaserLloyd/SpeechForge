@@ -527,3 +527,29 @@ byte-identical audio between inline audio and prepared codes. Seeds do not repro
 streaming HTTP server (they do on the CLI). The selftest clip's transcript used in the earlier
 cloning rows above was wrong (the golden text in `selftest.py` is the right one); the rows in
 this section used the right one.
+
+### Built with CUDA 13.1: the per-row cost was the toolkit (2026-10-15, profiled)
+
+`nsys` on a 371-row pre-fill of the 13.4 build: 62.6k kernel launches and 15.2k memsets,
+29,680 of them `DeviceTopKKernel` (40 layers x 371 rows x 2) -- the CUB top-k the port's
+`ggml_top_k` calls once per row from the host; the GPU busy ~190 ms of 1344 ms, launch API
+time 875 ms. The same source rebuilt with the CUDA 13.1 toolkit (`CUDACXX`, `CUDA_PATH`,
+`CUDAToolkit_ROOT` all on v13.1; `-CudaArchitectures 120a-real`), server timing lines, warm
+medians, `cpu_expert_layers 0`:
+
+| Prompt rows | Reference | 13.4 pre-fill / first audio | 13.1 pre-fill / first audio |
+| --- | --- | --- | --- |
+| 35 | none | 132 / 151 ms | 41 / 58 ms |
+| 92 | ~1.5 s | 264 / 298 | 58 / 86 |
+| 131 | ~3 s | 377 / 407 | 58 / 87 |
+| 206 | ~6 s | 546 / 571 | 70 / 92 |
+| 371 | 12.6 s | 868 / 901 | 88 / 116 |
+
+Client first byte: no reference 158 -> 64 ms, 6 s 580 -> 104 ms, 12.6 s 914 -> 128 ms; decode
+RTF ~0.35 (was 0.39-0.55); takes now reproduce per seed. Knobs that changed nothing: `threads`
+2/8/16, `GGML_CUDA_GRAPH_OPT=1`; `codec_backend=cpu` costs ~100 ms; the spec's default
+`cpu_expert_layers` is 4 (249 ms at 371 rows) and must be set to 0. Through the SpeechForge
+adapter on the 13.1 build (codes per request, 24 kHz out, `seed` 11): 6 s clip 123-127 ms
+first audio (first unit 244 with the one-time encode), 12.6 s clip 140-152 ms, a voice kept
+from a 3.9 s take 100-132 ms, RTF 0.34-0.40; the kept voice produced the same audio length
+on both runs. Takes in `quality-2026-10-15-drama3/s34-*.wav`.

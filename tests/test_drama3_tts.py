@@ -463,25 +463,37 @@ def test_setup_drives_the_ports_own_tools_in_order(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(drama3_tts, "_vs_build_tools", lambda: True)
     runs: list[list[str]] = []
+    envs: list[dict] = []
 
     class Done:
         stdout = drama3_tts.AUDIOCPP_COMMIT + "\n"
 
     def fake_run(argv, **kw):
         runs.append([str(a) for a in argv])
+        envs.append(kw.get("env") or {})
         if argv[:2] == ["git", "clone"]:
             Path(argv[-1], ".git").mkdir(parents=True)
         return Done()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    out = drama3_tts.setup(_config(tmp_path), log=lambda s: None)
+    toolkit = tmp_path / "cuda-13.1"
+    (toolkit / "bin").mkdir(parents=True)
+    out = drama3_tts.setup(_config(tmp_path), cuda_toolkit=toolkit, cuda_arch="120a-real",
+                           log=lambda s: None)
     kinds = [r[0] for r in runs]
     assert kinds[0] == "git" and runs[0][1] == "clone"
     assert runs[0][3] == drama3_tts.AUDIOCPP_BRANCH
     assert any("model_manager_v2.py" in " ".join(r) and drama3_tts.MODEL_PACKAGE in r for r in runs)
-    build = [r for r in runs
+    build = [(r, e) for r, e in zip(runs, envs, strict=True)
              if "build_windows.ps1" in " ".join(r) or "build_linux.sh" in " ".join(r)]
-    assert build and all("fish_drama3" in r for r in build)
+    assert build and all("fish_drama3" in r for r, _ in build)
+    # S35: the build compiles with the named toolkit, through CUDACXX (CUDA_PATH is not enough).
+    for argv, env in build:
+        assert env["CUDAToolkit_ROOT"] == str(toolkit) and env["CUDA_PATH"] == str(toolkit)
+        assert env["CUDACXX"].startswith(str(toolkit / "bin"))
+        if "build_windows.ps1" in " ".join(argv):
+            assert argv[argv.index("-CudaArchitectures") + 1] == "120a-real"
+    assert out["cuda_toolkit"] == str(toolkit)
     assert out["commit"] == drama3_tts.AUDIOCPP_COMMIT
     assert out["model_exists"] is False and out["attribution"] == "Built with Fish Audio"
     assert Path(out["model_path"]).name == MODEL_FILE

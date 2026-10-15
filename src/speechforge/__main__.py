@@ -149,6 +149,8 @@ def cmd_engine_setup(args: argparse.Namespace) -> int:
                 root=Path(args.root) if args.root else None,
                 build=not args.no_build,
                 install_model=not args.no_model,
+                cuda_toolkit=Path(args.cuda_toolkit) if args.cuda_toolkit else None,
+                cuda_arch=args.cuda_arch,
             )
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"engine-setup drama3 failed: {exc}", file=sys.stderr)
@@ -548,6 +550,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default="", help="where to clone/build (default <data>/engines/...)")
     p.add_argument("--no-build", action="store_true", help="skip the build step")
     p.add_argument("--no-model", action="store_true", help="skip the model install")
+    p.add_argument("--cuda-toolkit", default="",
+                   help="CUDA toolkit root to build with (default: 13.1 if installed; S35)")
+    p.add_argument("--cuda-arch", default="auto",
+                   help="the build script's -CudaArchitectures (e.g. 120a-real)")
     p = add("verify-models", cmd_verify, "verify model files against models.lock")
     p.add_argument("--full", action="store_true", help="re-hash every file")
     p = add("doctor", cmd_doctor, "check this machine")

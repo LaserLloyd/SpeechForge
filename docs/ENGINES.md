@@ -456,25 +456,39 @@ Linux with CUDA, streams PCM over `POST /v1/audio/speech`, and clones from a cli
 ### Status
 
 Measured on the host 2026-10-15 (RTX 5090, package `fish_drama3_q4_experts_q8_backbone`,
-no CPU offload, 23.3 GB resident; `docs/BENCHMARKS.md`, "Drama 3 through audio.cpp"):
+no CPU offload, 23.3 GB resident; `docs/BENCHMARKS.md`, "Drama 3 through audio.cpp"), through
+the SpeechForge adapter (codes per request, 24 kHz out), **port built with CUDA 13.1** (S35):
 
 | | first audio | RTF |
 | --- | --- | --- |
-| built-in voice, 28-153 chars | 185-234 ms | 0.34-0.40 |
-| cloned from a 12.6 s clip | 920-1070 ms | 0.46-0.91 |
-| cold load | 21.7 s | |
+| improvised voice (no reference) | ~60 ms (server) | 0.35 |
+| cloned, 6 s clip (codes cached) | 123-127 ms | 0.34-0.35 |
+| cloned, 12.6 s clip (codes cached) | 140-152 ms | 0.36 |
+| voice kept from a 3.9 s take | 100-132 ms | 0.36-0.40 |
+| first unit of a new clip voice (one-time encode) | +100-200 ms | |
+| cold load | 18-22 s | |
 
-Where the cloned-voice time goes (three agents read the port and the model's own code and
-measured it, 2026-10-15): the codec encode is already cached in the port and is NOT the cost.
-The backbone **re-reads the reference frames on every request** -- the port rebuilds the
-whole prompt (system text, `[Reference N]` rows, user turn) and pre-fills from position 0 --
-at about **2.4 ms per row, i.e. ~55 ms per second of reference** on top of ~110 ms for the
-text. Pre-encoded codes save only 40-130 ms and the 800 KB upload. So: a 6 s reference lands
-around 350-450 ms, a voice kept from a 2-3 s take around 300-350 ms, and ~200 ms for a long
-reference needs a per-voice prefix cache inside the port's backbone (below). The official
-runtime behaves the same way (SGLang-Omni runs with prefix caching off; a reference-code
-cache and prefix caching are on its roadmap). Not run against the sf.1 gates or the listening
-test yet; not the live engine.
+The same source **built with CUDA 13.4** pre-fills at ~2.4 ms per prompt row instead of
+~0.15 (cloned 12.6 s clip: 900-1070 ms, 6 s: ~450 ms) -- see "Where the time goes" below.
+
+Where the cloned-voice time goes (four agents read the port and the model's own code,
+profiled it with `nsys` and measured, 2026-10-15): the codec encode is already cached in the
+port and is NOT the cost. The backbone **re-reads the reference frames on every request** --
+the port rebuilds the whole prompt (system text, `[Reference N]` rows, user turn) and
+pre-fills from position 0 -- and the price of a row is set by the **CUDA toolkit the port was
+built with**. CUDA 13.4 bundles a CUB with a top-k, and the port's MoE router (`ggml_top_k`,
+`backbone.cpp:413`) then runs it once per row per layer from the host: 40 layers x 371 rows
+x 5 launches, 62.6k kernel launches for one pre-fill, the GPU busy 190 ms of 1344. CUDA 13.1
+has no such top-k, the op falls back to one sort per layer, and the same source pre-fills at
+~0.15 ms per row (12.6 s reference: 88 ms pre-fill, 128 ms to first audio; seeds reproduce,
+which they did not under 13.4 because the CUB top-k returns experts in no fixed order). No
+runtime option changes this (`threads`, `GGML_CUDA_GRAPH_OPT`, `codec_backend`;
+`cpu_expert_layers` must be 0, its default is 4). Pre-encoded codes save a further 40-130 ms
+and the 800 KB upload. The official runtime re-pre-fills too (SGLang-Omni runs with prefix
+caching off). The code change that would make the 13.4 build equally fast is
+`ggml_argsort_top_k` in place of `ggml_top_k` at `backbone.cpp:413` (and the fused routing
+kernel that recognises it). Not run against the sf.1 gates or the listening test yet; not the
+live engine.
 
 ### Install (`speechforge engine-setup drama3`)
 
@@ -484,9 +498,12 @@ Nothing of the engine is in this repository. The command drives the port's own t
    `<data>/engines/audio.cpp`, checked out at the pinned commit (`AUDIOCPP_COMMIT` in
    `engines/drama3_tts.py`).
 2. `scripts/build_windows.ps1 -Preset windows-cuda-release -ModelSet custom -Models fish_drama3`
-   for `audiocpp_server` and `audiocpp_cli` (`build_linux.sh` on Linux). Needs git, CMake,
-   the CUDA toolkit (`nvcc`) and Visual Studio 2022 Build Tools with the C++ workload; the
-   command names what is missing before it touches anything. About 5 minutes on the host.
+   for `audiocpp_server` and `audiocpp_cli` (`build_linux.sh` on Linux), **with the CUDA 13.1
+   toolkit when it is installed** (`CUDACXX`, `CUDA_PATH` and `CUDAToolkit_ROOT` set for the
+   build; `--cuda-toolkit <root>` names another; `--cuda-arch 120a-real` pins the card). A 13.4
+   build works but starts cloned voices 0.5-0.9 s late (S35). Needs git, CMake, the toolkit
+   (`nvcc`) and Visual Studio 2022 Build Tools with the C++ workload; the command names what
+   is missing before it touches anything. About 5 minutes on the host.
 3. `tools/model_manager_v2.py install fish_drama3_q4_experts_q8_backbone --models-root
    <models>/audiocpp` -- the port downloads the 22.9 GiB GGUF (`Jmica/Drama-3-GGUF`) into
    `<models>/audiocpp/Drama-3-GGUF/`, then the file is sha256-verified against the pin.
@@ -525,9 +542,9 @@ seed does not fix the timbre. Three ways to get one:
 
 | Way | How | Cost per request |
 | --- | --- | --- |
-| **Clip + transcript** | `PUT /v1/voices/<sha256>` with the `dotstts-ref` npz (`audio`, `rate`, `transcript`) -- the same file dots-tts takes. The engine encodes it ONCE per process through the server's `encode_reference_only` task (~35-100 ms, a server-side path written for the call and removed) and caches the codes (64 voices). | ~110 ms + ~55 ms per second of clip; `max_ref_s` (6 s) cuts the clip first |
+| **Clip + transcript** | `PUT /v1/voices/<sha256>` with the `dotstts-ref` npz (`audio`, `rate`, `transcript`) -- the same file dots-tts takes. The engine encodes it ONCE per process through the server's `encode_reference_only` task (~35-100 ms, a server-side path written for the call and removed) and caches the codes (64 voices). | 13.1 build: ~100-150 ms for 6-12 s of clip; 13.4 build: ~110 ms + ~55 ms per second. `max_ref_s` (6 s) cuts the clip first |
 | **Codes only** | The same container with a `vq_codes` int32 `(10, frames)` array and the `transcript`; `audio` optional. `make_voice_codes()` builds it. No encode at all. | the same, by the number of frames |
-| **Keep this voice** | `POST /v1/voices/surprise {"text", "seed"}`: the engine speaks the text in an improvised voice (`POST /v1/tasks/run` with no reference), the take's own codes become a stored voice, and the reply carries the id and a 24 kHz preview WAV. Pick a short line (2-4 s) and keep the ones you like. | ~300-350 ms for a 2-3 s take |
+| **Keep this voice** | `POST /v1/voices/surprise {"text", "seed"}`: the engine speaks the text in an improvised voice (`POST /v1/tasks/run` with no reference), the take's own codes become a stored voice, and the reply carries the id and a 24 kHz preview WAV. Pick a short line (2-4 s) and keep the ones you like. | ~100-130 ms (13.1 build) for a 4 s take |
 
 Every request then sends `options.references: [{text, vq_codes}]` -- never audio -- so the
 server skips its encoder and the body is ~14 KB for a 12 s reference instead of ~800 KB.
@@ -538,12 +555,12 @@ in an improvised voice. The codes depend on the codec checkpoint, which the Q4 p
 Speaker tags: untagged text and references are speaker 0; the port accepts
 `<|speaker:0|>`..`<|speaker:15|>` but SpeechForge sends one voice per context.
 
-What would make long references fast (the lead for a patch to the port, not written here):
-split the prompt into a per-voice prefix (system text + reference rows) and a per-request
-suffix, save the backbone state after the prefix (the 10 full-attention layers' KV rows, the
-30 Gated-DeltaNet states and their convolution tails, ~80 MB per voice), and pre-fill only the
-suffix (~35-45 rows, ~120-150 ms) on a cache hit. A second lead: 2.4 ms per row is slow for a
-5090, so the pre-fill path itself (batching, CUDA graphs) is worth profiling. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
+What is left on the 13.1 build for a 371-row pre-fill: 89 ms wall, 35 ms of matrix
+multiplies, ~15 ms summing the eight experts' outputs (`backbone.cpp:425-426`, a permute and
+`sum_rows` that a view-and-add would halve), 6 ms of linear attention and ~20 ms of launch
+gaps. A per-voice prefix cache (save the backbone state after the reference rows, pre-fill
+only the ~35-row suffix) would take ~60-90 ms more off a long reference; it is a C++ change
+to the port and was not written. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
 `threads`, `cpu_expert_layers` (VRAM offload; 4 for a 24 GB card), `context_length`,
 `max_tokens`, `max_ref_s`, `output_rate`, `startup_timeout_s`, `http_timeout_s`.
 
@@ -566,8 +583,8 @@ suffix (~35-45 rows, ~120-150 ms) on a cache hit. A second lead: 2.4 ms per row 
 
 ### Open questions
 
-- The per-voice prefix cache (above) is the one change that gets a long reference to
-  ~200 ms; until then keep references short or keep voices from short takes.
+- `ggml_argsort_top_k` in the port would make the CUDA 13.4 build as fast as 13.1 and is
+  the change to offer upstream; until then `engine-setup` prefers 13.1.
 - The port is marked experimental: some emotion tags run long or drop words (observed by its
   author on every package). A listening test against Chatterbox and Qwen3-TTS is pending.
 - A 3090 (24 GB) needs `cpu_expert_layers: 4` or the Q3 package; neither is measured here.
