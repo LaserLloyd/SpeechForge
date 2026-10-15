@@ -189,6 +189,54 @@ class DotsTtsConfig(_Section):
         return text
 
 
+class Drama3TtsConfig(_Section):
+    """``tts.drama3``: Fish Audio Drama 3 through audio.cpp (``engines/drama3_tts.py``).
+
+    An add-on engine: ``speechforge engine-setup drama3`` builds the port and installs
+    the GGUF outside the repository. It clones from the reference clip itself, so it
+    loads only with ``voices.allow_reference_clip: true`` (decision D3).
+    """
+
+    #: ``spawn`` launches ``audiocpp_server`` on the leased card with a generated
+    #: config; ``http`` talks to one you run yourself (loopback only).
+    backend: Literal["spawn", "http"] = "spawn"
+    url: str = "http://127.0.0.1:8035"
+    port: int = Field(8035, ge=1024, le=65535)
+    #: "" = ``<data>/engines/audio.cpp/build/<preset>/bin/audiocpp_server``.
+    server_exe: str = ""
+    #: "" = ``<models>/audiocpp/Drama-3-GGUF/<package file>``.
+    model_path: str = ""
+    threads: int = Field(8, ge=1, le=64)
+    #: Expert layers kept on the CPU (VRAM offload); 0 on a 32 GB card.
+    cpu_expert_layers: int = Field(0, ge=0, le=40)
+    context_length: int = Field(2048, ge=512, le=16384)
+    #: Generation cap per request (21.5 frames per second of speech).
+    max_tokens: int = Field(800, ge=50, le=4000)
+    http_timeout_s: float = Field(120.0, gt=0, le=600)
+    startup_timeout_s: float = Field(180.0, gt=0, le=1800)
+    #: The server encodes the reference on EVERY request (~70 ms per second of
+    #: clip on a 5090), so the clip is cut here: 6 s is the knee between
+    #: speaker similarity and first-audio latency.
+    max_ref_s: float = Field(6.0, ge=1.0, le=20.0)
+    #: 24000 resamples the model's 44.1 kHz to the sf.1 frame rate.
+    output_rate: Literal[24000, 44100] = 24000
+
+    @field_validator("url")
+    @classmethod
+    def _loopback_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(value.strip())
+        if parts.scheme != "http" or not parts.hostname:
+            raise ValueError("tts.drama3.url must be an http:// URL")
+        if not is_loopback_host(parts.hostname):
+            raise ValueError(
+                "tts.drama3.url must be loopback: the reference clip leaves this process "
+                "only to a server on this machine (D3, SPEC 8.4)"
+            )
+        return value.strip().rstrip("/")
+
+
 class TtsConfig(_Section):
     engine: str = "chatterbox"
     qwen3: Qwen3TtsConfig = Field(default_factory=Qwen3TtsConfig)
@@ -209,6 +257,8 @@ class TtsConfig(_Section):
     max_http_streams: int = Field(1, ge=1, le=8)
     #: Knobs of the ``dots-tts`` engine (docs/ENGINES.md); ignored by the others.
     dots: DotsTtsConfig = Field(default_factory=DotsTtsConfig)
+    #: Knobs of the ``drama3-tts`` add-on engine (docs/ENGINES.md); ignored by the others.
+    drama3: Drama3TtsConfig = Field(default_factory=Drama3TtsConfig)
 
 
 class NemotronConfig(_Section):

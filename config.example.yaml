@@ -71,6 +71,18 @@ tts:
     language: null         # null, auto_detect, or a language code
     normalize_text: false
     allow_missing_text_normalizer: true   # shim WeTextProcessing (no Windows wheels)
+  drama3:                  # engine: drama3-tts only (docs/ENGINES.md). Add-on: `speechforge engine-setup drama3`. Needs voices.allow_reference_clip (D3).
+    backend: spawn         # spawn = audiocpp_server launched on the leased card; http = a server you run (loopback only)
+    url: http://127.0.0.1:8035   # http backend
+    port: 8035             # spawn backend
+    server_exe: ""         # "" = <data>/engines/audio.cpp/build/<preset>/bin/audiocpp_server
+    model_path: ""         # "" = <models>/audiocpp/Drama-3-GGUF/drama-3-backbone-8bit-experts-Q4_K_S.gguf
+    threads: 8
+    cpu_expert_layers: 0   # VRAM offload; 0 on a 32 GB card (23.3 GB resident), 4 on 24 GB
+    context_length: 2048
+    max_tokens: 800        # per request; 21.5 frames per second of speech
+    max_ref_s: 6.0         # the server re-encodes the reference every request: shorter = faster first audio
+    output_rate: 24000     # 44100 = the model's native rate
 
 stt:
   engine: parakeet         # or nemotron: NVIDIA Nemotron Speech Streaming EN 0.6B (docs/ENGINES.md;

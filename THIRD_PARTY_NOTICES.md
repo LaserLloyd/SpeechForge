@@ -104,6 +104,24 @@ pinned revisions.
   be clearly marked; dots.tts applies no watermark. If you publish audio made with a cloned
   voice, say that it is synthetic.
 
+### Fish Audio Drama 3 through audio.cpp (add-on engine; `tts.engine: drama3-tts`)
+
+- Weights: https://huggingface.co/fishaudio/drama-3 (Fish Audio), run here as the community
+  GGUF package https://huggingface.co/Jmica/Drama-3-GGUF (a derivative work under the same
+  licence). Not in `models.lock`: `speechforge engine-setup drama3` installs it with the
+  port's model manager and verifies the pinned sha256.
+- Licence: **Fish Audio Community License v1.0** (2026-10-13). Free for research, personal
+  and non-commercial use and for commercial use under USD 500,000 annual revenue; a hosted
+  text-to-speech or voice-cloning service for third parties needs a separate licence
+  (contact on fish.audio); no cloning of an identifiable person without consent; no watermark
+  removal; no training of other speech models on its outputs. Required attribution:
+  **Built with Fish Audio** (the engine's `describe()` carries it; display it on any
+  product that uses the engine).
+- Runtime: https://github.com/JarodMica/audio.cpp, branch `drama-3-native`, Apache-2.0,
+  Copyright 2026 ShugoAI LLC. Built from source outside the repository by `engine-setup`.
+- Nothing is fetched or installed by default; the engine loads only with the owner's
+  `voices.allow_reference_clip: true` (decision D3) and `tts.engine: drama3-tts`.
+
 ### Self-test clip (shipped)
 
 - `src/speechforge/assets/selftest-voice.wav`: synthetic speech made with Kokoro-82M (voice

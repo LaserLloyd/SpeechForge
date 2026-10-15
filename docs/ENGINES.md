@@ -441,6 +441,106 @@ examples/configs/dots_tts.yaml --port 8000`, loopback) and `tts.dots.backend: ht
 
 ---
 
+## Fish Audio Drama 3 through audio.cpp (`tts.engine: drama3-tts`) -- add-on engine
+
+**Built with Fish Audio.** Drama 3 (released 2026-10-13) is a 35B mixture-of-experts TTS
+model with 3B active parameters per token: a Qwen3.5-35B-A3B backbone with hybrid linear
+attention, a codebook-MTP decoder over the Descript-codec tokenizer (44.1 kHz, 10 codebooks,
+21.5 frames/s), 83 languages, inline direction tags (`[laughs]`, `[whispering]`,
+`<|speaker:N|>` for up to 16 speakers) and cloning from a reference clip plus transcript.
+The official runtime is SGLang-Omni on Linux with a 48 GB card in FP8. This engine runs the
+**community audio.cpp port** instead (JarodMica/audio.cpp, branch `drama-3-native`,
+Apache-2.0): a ggml runtime that loads a mixed-quantization GGUF natively on Windows and
+Linux with CUDA, streams PCM over `POST /v1/audio/speech`, and clones from a clip.
+
+### Status
+
+Measured on the host 2026-10-15 (RTX 5090, package `fish_drama3_q4_experts_q8_backbone`,
+no CPU offload, 23.3 GB resident; `docs/BENCHMARKS.md`, "Drama 3 through audio.cpp"):
+
+| | first audio | RTF |
+| --- | --- | --- |
+| built-in voice, 28-153 chars | 185-234 ms | 0.34-0.40 |
+| cloned from a 12.6 s clip | 920-1070 ms | 0.46-0.91 |
+| cold load | 21.7 s | |
+
+The server **re-encodes the reference clip on every request** (about 70 ms per second of
+clip); it has no voice cache, so `tts.drama3.max_ref_s` (6 s) is the latency knob for cloned
+voices. Not run against the sf.1 gates or the listening test yet; not the live engine.
+
+### Install (`speechforge engine-setup drama3`)
+
+Nothing of the engine is in this repository. The command drives the port's own tooling:
+
+1. `git clone --branch drama-3-native https://github.com/JarodMica/audio.cpp.git` into
+   `<data>/engines/audio.cpp`, checked out at the pinned commit (`AUDIOCPP_COMMIT` in
+   `engines/drama3_tts.py`).
+2. `scripts/build_windows.ps1 -Preset windows-cuda-release -ModelSet custom -Models fish_drama3`
+   for `audiocpp_server` and `audiocpp_cli` (`build_linux.sh` on Linux). Needs git, CMake,
+   the CUDA toolkit (`nvcc`) and Visual Studio 2022 Build Tools with the C++ workload; the
+   command names what is missing before it touches anything. About 5 minutes on the host.
+3. `tools/model_manager_v2.py install fish_drama3_q4_experts_q8_backbone --models-root
+   <models>/audiocpp` -- the port downloads the 22.9 GiB GGUF (`Jmica/Drama-3-GGUF`) into
+   `<models>/audiocpp/Drama-3-GGUF/`, then the file is sha256-verified against the pin.
+
+`--no-build` / `--no-model` / `--root <dir>` skip or redirect steps. Then in `config.yaml`:
+
+```yaml
+tts:
+  engine: drama3-tts
+  drama3:
+    backend: spawn          # audiocpp_server launched on the leased card
+voices:
+  allow_reference_clip: true   # D3: this engine clones from the clip itself
+```
+
+### How it is wired
+
+`backend: spawn` writes `<data>/drama3-server.json` in the server's documented shape (one
+streaming `fish_drama3` model, loaded at start, no idle unload of its own, no UI) and launches
+`audiocpp_server --config` with `CUDA_VISIBLE_DEVICES` set to the leased card; SpeechForge's
+residency owns its life (the lease decides when the process lives, `close()` terminates it).
+`/health` is polled for `startup_timeout_s`. `backend: http` attaches to a server you run
+(loopback only, validated). Each unit is one `POST /v1/audio/speech` with
+`response_format: pcm`, `stream_format: audio` (raw s16le 44.1 kHz over chunked transfer),
+`voice_ref` as a base64 WAV of the first `max_ref_s` seconds of the clip and
+`reference_text` as its transcript; the adapter resamples 44.1 kHz to 24 kHz with a
+streaming polyphase filter identical to `audio.resample_poly` (`PolyphaseResampler`) and
+yields 40 ms credit tokens like every other engine. Voices use the same
+`dotstts-ref` container as dots-tts (clip + transcript npz), so a client builds one file for
+every clip-cloning engine -- **with the transcript**: the server refuses a reference without
+`reference_text` (seen live), so a transcript-less file is refused at `PUT /v1/voices` with
+`bad_voice`, `POST /v1/voices/from-reference` is refused the same way, and the warm-up speaks
+with the model's built-in voice. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
+`threads`, `cpu_expert_layers` (VRAM offload; 4 for a 24 GB card), `context_length`,
+`max_tokens`, `max_ref_s`, `output_rate`, `startup_timeout_s`, `http_timeout_s`.
+
+### Licences
+
+- Weights: **Fish Audio Community License v1.0** (2026-10-13). Free for research, personal
+  and non-commercial use, and for commercial use while you and your affiliates stay under
+  USD 500,000 annual revenue. A *hosted service* -- letting third parties generate speech
+  from their own text or voices through an API, SDK or a product whose primary purpose is
+  TTS or voice cloning -- needs a separate licence from Fish Audio (contact on fish.audio) whatever the
+  revenue; generating speech for content you control (narration, characters, a household
+  voice chat) is excluded from that definition. Cloning an identifiable person's voice
+  needs their consent; watermarks must not be removed; outputs must not train other
+  speech models. Products using the model must display "Built with Fish Audio"
+  (`describe().attribution` carries it; put it on your product page too).
+- The GGUF packages (`Jmica/Drama-3-GGUF`) are derivative works under the same licence.
+- audio.cpp: Apache-2.0, Copyright 2026 ShugoAI LLC.
+- Nothing is fetched or installed by default; the engine loads only with the owner's
+  `voices.allow_reference_clip: true` (D3) and `tts.engine: drama3-tts`.
+
+### Open questions
+
+- Reference caching: the port encodes the clip per request. Pre-encoded `vq_codes` are
+  accepted in `references`, so a one-time encode per voice would bring cloned first audio
+  back to ~200 ms; the port exposes no encode route yet.
+- The port is marked experimental: some emotion tags run long or drop words (observed by its
+  author on every package). A listening test against Chatterbox and Qwen3-TTS is pending.
+- A 3090 (24 GB) needs `cpu_expert_layers: 4` or the Q3 package; neither is measured here.
+
 ## Nemotron Speech Streaming EN 0.6B (STT, `stt.engine: nemotron`)
 
 **Measured on the host, 2026-10-11 [M]** (RTX 5090, `backend: subprocess` with sherpa-onnx

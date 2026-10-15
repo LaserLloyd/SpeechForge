@@ -137,7 +137,14 @@ def register_tts(
 
 def builtin() -> None:
     """Register the engines that ship with SpeechForge."""
-    from speechforge.engines import chatterbox_tts, dots_tts, nemotron, parakeet, qwen3_tts
+    from speechforge.engines import (
+        chatterbox_tts,
+        dots_tts,
+        drama3_tts,
+        nemotron,
+        parakeet,
+        qwen3_tts,
+    )
     from speechforge.voices import parse_npz
 
     register_stt("parakeet", parakeet.load)
@@ -145,3 +152,4 @@ def builtin() -> None:
     register_tts("chatterbox", chatterbox_tts.load, parse_npz)
     register_tts("qwen3-tts", qwen3_tts.load, qwen3_tts.parse_voice)
     register_tts("dots-tts", dots_tts.load, dots_tts.parse_voice)
+    register_tts("drama3-tts", drama3_tts.load, drama3_tts.parse_voice)

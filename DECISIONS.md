@@ -542,3 +542,33 @@ point or "Dr.") produced fragments that read as uneven pacing. The only other ca
 measurement found was the LM slowing from 8 to 46-65 ms per token while the decoder ran, in
 the probe's first renders on a cold engine; the live host warms every LM worker at load and its
 `tts_step_ms` histogram shows 98 % of steps under 20 ms, so it is recorded here, not acted on.
+
+## S33 -- Drama 3 is an add-on engine built from the port's own tooling (2026-10-15)
+
+**Context.** Fish Audio released Drama 3 on 2026-10-13: a 35B-A3B MoE TTS model with
+direction tags and clip cloning, officially served by SGLang-Omni on Linux with 48 GB of
+VRAM. A community audio.cpp port (`drama-3-native`) runs a 23 GB mixed-quant GGUF natively on
+Windows with CUDA and streams. Measured on the host (BENCHMARKS): first audio 185-234 ms, RTF
+0.35 on a 5090 -- the Chatterbox class -- with cloned voices at ~1 s because the server
+re-encodes the reference every request.
+
+**Decision.**
+
+- *Nothing vendored.* The port (Apache-2.0) and the weights (Fish Audio Community License
+  v1.0: free below USD 500k revenue, no hosted service for third parties, consent for
+  cloning, "Built with Fish Audio") stay out of the repository. `speechforge engine-setup
+  drama3` clones the port at a pinned commit, builds it with its own `build_windows.ps1` /
+  `build_linux.sh`, and installs the package with its own `model_manager_v2.py`, then
+  sha256-verifies the file against the pin. `models.lock` does not list it (`tts_groups`
+  answers `[]`); the port's model manager is the source of truth for its files.
+- *The server is the server's.* `backend: spawn` writes the documented config shape and
+  launches `audiocpp_server` on the leased card; `backend: http` attaches to one the operator
+  runs. The adapter speaks the documented `/v1/audio/speech` streaming request and nothing
+  private to the port.
+- *One clip-voice container.* `dotstts-ref` (clip + transcript) is reused rather than a
+  fourth format; `max_ref_s` (6 s) bounds the per-request encode.
+- *Exact resampling.* 44.1 kHz to 24 kHz through `PolyphaseResampler`, a streaming form of
+  `audio.resample_poly` proven sample-for-sample equal to the whole-clip result.
+- *Not the live engine.* Chatterbox stays on the 3090; Drama 3 needs a 32 GB card or
+  `cpu_expert_layers`. The gates, the listening test and a reference-code cache are the
+  next steps before a switch.

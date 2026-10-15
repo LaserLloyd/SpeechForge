@@ -54,6 +54,8 @@ def tts_groups(config: Any) -> list[str]:
         if dots.backend == "http":
             return []  # the weights live with the server, not in models_dir
         return ["tts-dots-stts" if dots.double_streaming else "tts-dots"]
+    if tts.engine == "drama3-tts":
+        return []  # installed by audio.cpp's model manager (engine-setup), not models.lock
     return [f"tts-{config.models.tts_dtype}"]
 
 

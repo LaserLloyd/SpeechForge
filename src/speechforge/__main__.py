@@ -137,6 +137,29 @@ def cmd_tray(args: argparse.Namespace) -> int:
     return tray_main(config, args.config)
 
 
+def cmd_engine_setup(args: argparse.Namespace) -> int:
+    """Build and install an add-on engine with the engine's own tooling."""
+    config = load_config(args.config)
+    if args.engine == "drama3":
+        from speechforge.engines import drama3_tts
+
+        try:
+            out = drama3_tts.setup(
+                config,
+                root=Path(args.root) if args.root else None,
+                build=not args.no_build,
+                install_model=not args.no_model,
+            )
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"engine-setup drama3 failed: {exc}", file=sys.stderr)
+            return 1
+        ok = out["server_exe_exists"] and out["model_exists"]
+        print("ready" if ok else "incomplete: " + json.dumps(out, indent=2))
+        return 0 if ok else 1
+    print(f"unknown engine {args.engine!r}", file=sys.stderr)
+    return 2
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     from speechforge import models
 
@@ -519,6 +542,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--group", action="append", help="lock group(s), e.g. tts-fp16 (default: what config needs)"
     )
     p.add_argument("--force", action="store_true")
+    p = add("engine-setup", cmd_engine_setup,
+            "build and install an add-on TTS engine with its own tooling (drama3)")
+    p.add_argument("engine", choices=["drama3"])
+    p.add_argument("--root", default="", help="where to clone/build (default <data>/engines/...)")
+    p.add_argument("--no-build", action="store_true", help="skip the build step")
+    p.add_argument("--no-model", action="store_true", help="skip the model install")
     p = add("verify-models", cmd_verify, "verify model files against models.lock")
     p.add_argument("--full", action="store_true", help="re-hash every file")
     p = add("doctor", cmd_doctor, "check this machine")

@@ -479,3 +479,29 @@ After S31 went live (10 s prompt, sentence units; three `bench -n 10` runs with 
 TTFA p50 201-203 ms (the longer decoder prompt costs about 10 ms on the 3090), p90 205-511 ms
 (run-to-run; the server-side `tts_ttfa_ms` histogram over 90 contexts puts p50 under 250 ms),
 RTF p50 0.24-0.26, cancel p99 7 ms, partial lag p90 94 ms, round-trip WER 2.5 %.
+
+## Drama 3 through audio.cpp (2026-10-15)
+
+Fish Audio Drama 3 (35B-A3B MoE, released 2026-10-13) via the audio.cpp `drama-3-native`
+port, package `fish_drama3_q4_experts_q8_backbone` (Q4_K experts, Q8_0 backbone, FP16 codec,
+22.9 GiB), `cpu_expert_layers 0`, `context_length 2048`, on an idle RTX 5090 under a
+StudioForge probe lease. 23.3 GB resident. Cold load 21.7 s (CLI) / 10-12 s to `/health`
+(server, model preloaded). Timed through `POST /v1/audio/speech` with
+`stream_format: audio` from a loopback client (`ttfb` = first PCM bytes):
+
+| request | chars | first audio | wall | audio | RTF |
+| --- | --- | --- | --- | --- | --- |
+| built-in voice | 28 | 185 ms | 0.91 s | 2.28 s | 0.40 |
+| built-in voice, direction tags | 127 | 234 ms | 6.05 s | 17.65 s | 0.34 |
+| built-in voice | 153 | 234 ms | 3.47 s | 9.85 s | 0.35 |
+| cloned, 12.6 s reference (base64) | 28 | 1074 ms | 1.65 s | 1.81 s | 0.91 |
+| cloned, 12.6 s reference (base64) | 127 | 1002 ms | 3.56 s | 7.80 s | 0.46 |
+| cloned, same clip via `voice_dir`, 4 runs | 40 | 921-939 ms (first 1548) | 1.73 s | 2.46 s | 0.70 |
+
+Findings: generation runs at about 60 frames/s (RTF 0.35) on the 5090, which is the Chatterbox
+fp16 class; first audio for a built-in voice is at the sf.1 gate (p50 190 ms on Chatterbox).
+The reference clip is encoded on every request -- `voice_dir` does not cache it -- at roughly
+70 ms per second of clip, so cloned requests pay 0.7-0.9 s before the first byte; the engine
+cuts clips to `max_ref_s` (6 s) for that reason. The dramatic rendering varies a lot by take:
+the same 127-character line produced 17.7 s with pauses and 7.8 s cloned. Listening takes are
+in the private quality folder (`quality-2026-10-15-drama3/`).

@@ -106,8 +106,9 @@ every route but `/health` needs the bearer token in an `Authorization` header, a
 `Origin` is refused, and the token is never logged. The security review of the tree is
 [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md).
 
-Engines beyond the default pair (Qwen3-TTS, dots.tts, Nemotron streaming STT) and what each
-measured: [`docs/ENGINES.md`](docs/ENGINES.md). A blind listening test for choosing between
+Engines beyond the default pair (Qwen3-TTS, dots.tts, Nemotron streaming STT, and Fish Audio
+Drama 3 as an add-on built by `speechforge engine-setup drama3`) and what each measured:
+[`docs/ENGINES.md`](docs/ENGINES.md). A blind listening test for choosing between
 voices: [`docs/LISTENING-TEST.md`](docs/LISTENING-TEST.md).
 
 ## Development
