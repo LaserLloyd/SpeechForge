@@ -20,6 +20,10 @@ purpose (DECISIONS S1).
 limits, auth, engines behind fakes: 365 tests), end to end with the real models on the CPU
 provider, and benchmarked on the card ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
 
+**Read more:** [laserlloyd.com/ai](https://www.laserlloyd.com/ai/) for the rest of the local-AI
+projects, including the [StudioForge write-up](https://www.laserlloyd.com/projects/studioforge-gpu-only-llm-server/)
+and the [DisPatch write-up](https://www.laserlloyd.com/projects/dispatch-self-hosted-ai-chat/).
+
 Measured on the host (fp16 Chatterbox, one session, over a WireGuard tailnet):
 
 | What | Value |
