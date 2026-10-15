@@ -2,7 +2,7 @@
 name = "speechforge"
 # Calendar-free on purpose until the first rig deploy: 0.x means "the API may
 # still move". The display version lives in src/speechforge/__init__.py.
-version = "0.2.0"
+version = "0.3.0"
 description = "A small GPU speech server: Parakeet TDT speech-to-text and Chatterbox-Turbo streaming text-to-speech over ONNX Runtime, cooperating with StudioForge through its GPU lease API."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -141,6 +141,10 @@ src = ["src", "tests", "tools"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET"]
 ignore = ["B008", "SIM108"]
+
+[tool.ruff.lint.per-file-ignores]
+# The deny-list regexes read better on one line each.
+"scripts/scrub_check.py" = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

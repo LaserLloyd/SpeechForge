@@ -46,6 +46,7 @@ Design notes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import subprocess
 import sys
@@ -56,10 +57,8 @@ from pathlib import Path
 # hook then fails the COMMIT with a codec traceback on a perfectly clean tree.
 # The gate must never be the thing that breaks; degrade the glyphs, not the run.
 for _stream in (sys.stdout, sys.stderr):
-    try:
+    with contextlib.suppress(AttributeError, ValueError):  # exotic streams
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):  # pragma: no cover - exotic streams
-        pass
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -845,7 +844,7 @@ def selftest() -> int:
         if scan_text(git_comment_block, "msg"):
             failures.append("the git comment block was scanned (it is stripped "
                             "before the message is stored)")
-        if not scan_commit_range(root, "HEAD~0..HEAD") == []:
+        if scan_commit_range(root, "HEAD~0..HEAD") != []:
             failures.append("an empty commit range should be clean, not an error")
 
     print("scrub_check --selftest: index-vs-working-tree, commit-vs-working-tree, "

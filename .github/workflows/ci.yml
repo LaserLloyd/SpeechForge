@@ -1,0 +1,45 @@
+name: CI
+
+# The public gate: lint, the CPU-fake test suite (no ONNX Runtime, no models,
+# no GPU) and the private-data scan. The real-model and GPU tests need a host
+# with the models and a card; they skip here by design.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scrub_check --commit-range needs the history
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install (locked, dev extra only)
+        run: uv sync --locked --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Tests (CPU fakes)
+        run: uv run pytest -q
+
+      - name: Private-data scan (tree)
+        run: uv run python scripts/scrub_check.py
+
+      - name: Private-data scan (commit messages on this push)
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        run: uv run python scripts/scrub_check.py --commit-range ${{ github.event.before }}..${{ github.sha }}
