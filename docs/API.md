@@ -70,6 +70,15 @@ the speech encoder sees it (decision S30); `voices.prepare_reference: false` ski
 Nothing else: no noise reduction, no gate inside speech, no compression, no cut to a fixed length.
 The 3-30 s limit applies to the trimmed clip (`400 bad_audio` otherwise).
 
+An engine that clones from the clip's **words** (Drama 3, `drama3-tts`) also needs the
+transcript (S37). Send it in the `X-Reference-Transcript` header (at most 2000 characters), or
+send nothing and the rig transcribes the clip with its own STT; the reply then carries
+`transcript`, `transcript_source` (`caller` / `stt`) and, for the STT path, `transcribe_ms`.
+The clip is cut to `tts.drama3.max_ref_s`, encoded once, and the stored voice carries the codes,
+the transcript and the clip, so speaking it never encodes again. A clip in which the STT hears
+no words is refused `400 bad_audio`. This is the route the DisPatch voice add-on can use for a
+sample recorded on the box: `reference.wav` of the profile, no transcript needed.
+
 `201` returns `{"id": "sha256:...", "clip": {...}}`:
 
 | `clip` field | Meaning |

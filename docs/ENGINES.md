@@ -543,6 +543,7 @@ seed does not fix the timbre. Three ways to get one:
 | Way | How | Cost per request |
 | --- | --- | --- |
 | **Clip + transcript** | `PUT /v1/voices/<sha256>` with the `dotstts-ref` npz (`audio`, `rate`, `transcript`) -- the same file dots-tts takes. The engine encodes it ONCE per process through the server's `encode_reference_only` task (~35-100 ms, a server-side path written for the call and removed) and caches the codes (64 voices). | 13.1 build: ~100-150 ms for 6-12 s of clip; 13.4 build: ~110 ms + ~55 ms per second. `max_ref_s` (6 s) cuts the clip first |
+| **A clip alone** (S37) | `POST /v1/voices/from-reference` with the WAV: the server cleans the clip (S30), takes the transcript from the `X-Reference-Transcript` header or transcribes the clip with its own STT, encodes it once and stores a codes voice; the reply carries the id and the transcript. The DisPatch add-on's `reference.wav` works as is. | the same |
 | **Codes only** | The same container with a `vq_codes` int32 `(10, frames)` array and the `transcript`; `audio` optional. `make_voice_codes()` builds it. No encode at all. | the same, by the number of frames |
 | **Keep this voice** | `POST /v1/voices/surprise {"text", "seed"}`: the engine speaks the text in an improvised voice (`POST /v1/tasks/run` with no reference), the take's own codes become a stored voice, and the reply carries the id and a 24 kHz preview WAV. Pick a short line (2-4 s) and keep the ones you like. | ~100-130 ms (13.1 build) for a 4 s take |
 

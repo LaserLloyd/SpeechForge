@@ -685,10 +685,28 @@ class Drama3Tts:
         voice = make_voice_codes(line, np.asarray(codes, np.int32), preview, self.sample_rate)
         return voice, float_to_pcm16(preview)
 
-    def build_voice(self, reference: np.ndarray, rate: int) -> bytes:
-        """``POST /v1/voices/from-reference`` carries no transcript, and Drama 3
-        cannot clone without one: refused with the way that works."""
-        raise BadRequest(NO_TRANSCRIPT, code="bad_voice")
+    #: ``POST /v1/voices/from-reference``: the server transcribes the clip with its
+    #: own STT before calling ``build_voice`` (S37), unless the caller sent one.
+    needs_transcript = True
+
+    def build_voice(self, reference: np.ndarray, rate: int,
+                    transcript: str | None = None) -> bytes:
+        """A clip (prepared by the server) and its transcript -> a codes voice:
+        the clip is cut to ``max_ref_s``, encoded once through the server's
+        encode task, and stored with the codes, the transcript and the clip
+        itself, so nothing is encoded again at use. Without a transcript the
+        model cannot clone, so that is refused with the way that works."""
+        text = (transcript or "").strip()
+        if not text:
+            raise BadRequest(NO_TRANSCRIPT, code="bad_voice")
+        ref = np.asarray(reference, np.float32).reshape(-1)
+        limit = int(float(self.backend.cfg.max_ref_s) * rate)
+        if len(ref) > limit:
+            ref = ref[:limit]
+        clip = DotsVoice(ref, int(rate), text)
+        with self._lock:
+            codes = self.backend.encode_reference(clip, "from-reference")
+        return make_voice_codes(text, np.asarray(codes, np.int32), ref, int(rate))
 
     def stream(
         self,

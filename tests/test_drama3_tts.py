@@ -232,6 +232,41 @@ def test_codes_container_roundtrip_and_validation():
         make_voice_codes("x", np.zeros((10, 3000), np.int32))
 
 
+def test_build_voice_from_a_clip_and_transcript_stores_codes(tmp_path):
+    """from-reference (S37): the clip is cut to max_ref_s, encoded once, and the
+    voice file carries codes + transcript + clip; no transcript is refused."""
+    import httpx
+
+    from speechforge.errors import BadRequest
+
+    seen: list = []
+    be = drama3_tts._Backend(_config(tmp_path, max_ref_s=2.0), 1)
+    try:
+        be.client = httpx.Client(transport=httpx.MockTransport(fake_server(b"", log=seen)),
+                                 trust_env=False)
+        tts = Drama3Tts(be)
+        assert tts.needs_transcript is True
+        with pytest.raises(BadRequest, match="transcript"):
+            tts.build_voice(clip(5.0, TTS_SAMPLE_RATE), TTS_SAMPLE_RATE)
+        data = tts.build_voice(clip(5.0, TTS_SAMPLE_RATE), TTS_SAMPLE_RATE,
+                               transcript=" Words of the clip. ")
+        assert [p for p, _ in seen] == ["/v1/tasks/run"]
+        enc = seen[0][1]["request"]["options"]
+        assert enc == {"reference_text": "Words of the clip.", "encode_reference_only": True}
+        v = parse_voice(data)
+        assert v.transcript == "Words of the clip." and v.vq_codes.tolist() == CODES
+        assert v.audio is not None and abs(v.seconds - 2.0) < 1e-6
+        # Speaking it never encodes again.
+        be.client = httpx.Client(transport=httpx.MockTransport(fake_server(b"\x00\x00" * 441,
+                                                                           log=seen)),
+                                 trust_env=False)
+        list(tts.stream("Hi.", "v", v))
+        assert seen[-1][0] == "/v1/audio/speech"
+        assert seen[-1][1]["options"]["references"][0]["vq_codes"] == CODES
+    finally:
+        be.close()
+
+
 def test_take_keeps_an_improvised_voice(tmp_path):
     """take(): one request on /v1/tasks/run with no reference; the take's own
     codes become a codes-only voice and the audio comes back at 24 kHz."""

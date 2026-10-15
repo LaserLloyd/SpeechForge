@@ -634,3 +634,19 @@ patched 13.1 build. Offer the patch upstream together with the `ggml_argsort_top
 when the port carries both, the shipped patch and the toolkit preference go away. Not done:
 a single-pass pre-fill that snapshots mid-way (would remove the cold penalty), a memory
 budget instead of an entry count, snapshots across restarts.
+
+## S37 -- from-reference builds a Drama 3 voice: the rig transcribes the clip (2026-10-15)
+
+**Context.** A Drama 3 voice needs the clip's words, and the clips that exist -- the DisPatch
+voice add-on's `reference.wav` per profile, the owner's recordings -- come without a transcript.
+The add-on uploads Chatterbox conditionals today, which carry neither the waveform nor the words,
+so nothing it sends can become a Drama 3 voice.
+
+**Decision.** `POST /v1/voices/from-reference` does the whole job for an engine that
+`needs_transcript`: the caller may send `X-Reference-Transcript`; otherwise the rig transcribes
+the prepared clip with the STT it has loaded anyway (Parakeet, resampled to its 16 kHz), then the
+engine cuts the clip to `max_ref_s`, encodes it once and stores codes + transcript + clip. The
+reply says which (`transcript_source`). A clip with no recognisable words is `bad_audio`. On the
+box side the add-on needs one change to use it: when the rig's `ready.engines.tts.voice_format`
+is not `chatterbox-npz`, POST the profile's `reference.wav` to from-reference (under the owner's
+D3 opt-in, already on for this rig) instead of PUTting `voice.npz`, and remember the returned id.

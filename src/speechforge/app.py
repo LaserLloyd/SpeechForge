@@ -479,7 +479,11 @@ def create_app(
         server (band-limited resample to 24 kHz, DC removal, silence trim, level
         normalisation: S30), built with this server's own speech encoder; returns the
         id to speak with and a ``clip`` object (what was done, and any quality
-        warnings). Off by default: the reference clip stays on the box (decision D3)."""
+        warnings). An engine that clones from the clip's words (Drama 3) also needs
+        the transcript: ``X-Reference-Transcript`` header, else the rig's own STT
+        transcribes the clip (S37) and the reply says so (``transcript``,
+        ``transcript_source``). Off by default: the reference clip stays on the box
+        (decision D3)."""
         authorize(request)
         if not config.voices.allow_reference_clip:
             raise Forbidden(
@@ -504,11 +508,19 @@ def create_app(
                 + "; use 3-30 s",
                 code="bad_audio",
             )
+        # S37: an engine that clones from the clip's words (Drama 3) takes the
+        # transcript from this header, or transcribes the clip here.
+        transcript = request.headers.get("x-reference-transcript", "")
+        if len(transcript) > 2000:
+            raise BadRequest("X-Reference-Transcript: at most 2000 characters", code="bad_request")
         speaker = residency.require()
         async with residency.use():
-            data = await asyncio.to_thread(speaker.build_voice, audio, TTS_SAMPLE_RATE)
+            data, built = await asyncio.to_thread(
+                speaker.build_voice_from_clip, audio, TTS_SAMPLE_RATE, transcript)
         vid = await asyncio.to_thread(voices.put_bytes, data)
-        return JSONResponse({"id": f"sha256:{vid}", "clip": clip}, status_code=201)
+        body: dict[str, Any] = {"id": f"sha256:{vid}", "clip": clip}
+        body.update(built)
+        return JSONResponse(body, status_code=201)
 
     @app.post("/v1/voices/surprise")
     async def voice_surprise(request: Request) -> JSONResponse:

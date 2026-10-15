@@ -27,8 +27,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from speechforge.audio import crossfade, float_to_pcm16
-from speechforge.errors import SpeechError
+from speechforge.audio import crossfade, float_to_pcm16, resample_poly
+from speechforge.errors import BadRequest, SpeechError
 from speechforge.voices import VoiceTensors
 
 CROSSFADE_SAMPLES = 24000 * 20 // 1000
@@ -431,6 +431,33 @@ class Speaker:
 
     def build_voice(self, reference: np.ndarray, rate: int) -> bytes:
         return self.tts.build_voice(reference, rate)
+
+    def build_voice_from_clip(
+        self, reference: np.ndarray, rate: int, transcript: str | None = None
+    ) -> tuple[bytes, dict[str, Any]]:
+        """``POST /v1/voices/from-reference`` (S37): the voice bytes and what was
+        done. An engine that ``needs_transcript`` gets the caller's, or the
+        clip transcribed here by the loaded STT -- the clip is already on the
+        rig, so its words may as well come from the rig's own recogniser."""
+        info: dict[str, Any] = {}
+        if getattr(self.tts, "needs_transcript", False):
+            text = (transcript or "").strip()
+            source = "caller"
+            if not text:
+                stt_rate = int(self.stt.sample_rate)
+                audio = reference if rate == stt_rate else resample_poly(reference, rate, stt_rate)
+                text = self.transcribe(np.asarray(audio, np.float32)).strip()
+                source = "stt"
+                info["transcribe_ms"] = self.last_stt.get("cost_ms")
+            if not text:
+                raise BadRequest(
+                    "no words were recognised in the reference clip; send the transcript "
+                    "in the X-Reference-Transcript header or record a clearer clip",
+                    code="bad_audio",
+                )
+            info.update({"transcript": text, "transcript_source": source})
+            return self.tts.build_voice(reference, rate, transcript=text), info
+        return self.tts.build_voice(reference, rate), info
 
     def take(self, text: str, seed: int | None = None) -> tuple[bytes, np.ndarray]:
         """Keep this voice (S34): an engine that improvises voices returns one
