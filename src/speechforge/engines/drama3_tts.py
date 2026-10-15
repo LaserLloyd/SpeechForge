@@ -21,6 +21,19 @@ own model manager (``tools/model_manager_v2.py``). SpeechForge then spawns
 server's documented shape, and talks to its ``POST /v1/audio/speech`` over
 loopback. ``backend: http`` points at a server you run yourself instead.
 
+Voices (S34). A voice is the reference's ten-codebook VQ grid plus its
+transcript. A clip-plus-transcript file (``dotstts-ref``) is encoded ONCE per
+process through the server's ``encode_reference_only`` task and the codes are
+cached; a codes-only file (the same container with ``vq_codes``) needs no
+encode at all. Every request sends ``options.references`` with the codes, so
+the server never re-encodes and the body is ~14 KB instead of ~800 KB. What
+remains is the backbone re-reading the reference rows on every request --
+measured 2026-10-15 at ~2.4 ms per row, i.e. ~55 ms per second of reference
+on top of ~110 ms for the text -- which is why ``max_ref_s`` is 6 s and why a
+voice KEPT from a short take (``take()``: generate with no reference, store
+the take's own codes) speaks in ~300-400 ms. Cutting that further needs a
+per-voice prefix cache inside the port's backbone (docs/ENGINES.md).
+
 Licences: the weights are under the Fish Audio Community License v1.0 (free for
 research, personal and non-commercial use, and for commercial use below
 USD 500,000 annual revenue; a hosted TTS/voice-cloning service for third
@@ -35,6 +48,8 @@ Heavy work (httpx, subprocess) happens inside :func:`load` and :func:`setup`.
 from __future__ import annotations
 
 import base64
+import contextlib
+import io
 import json
 import math
 import os
@@ -43,14 +58,28 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from speechforge.audio import TTS_SAMPLE_RATE, _poly_filters, float_to_pcm16
-from speechforge.engines.dots_tts import DotsVoice, make_voice
+from speechforge.audio import (
+    TTS_SAMPLE_RATE,
+    _poly_filters,
+    float_to_pcm16,
+    read_wav,
+    resample_poly,
+)
+from speechforge.engines.dots_tts import (
+    MAX_INFLATED_BYTES,
+    MAX_VOICE_BYTES,
+    DotsVoice,
+    make_voice,
+)
 from speechforge.engines.dots_tts import parse_voice as _parse_ref
 from speechforge.errors import BadRequest
 
@@ -81,14 +110,24 @@ MODEL_LICENCE = (
     "Fish Audio Community License v1.0 (commercial terms at fish.audio above USD 500k revenue)"
 )
 
+#: The VQ grid: ten codebooks (one semantic, nine residual), ~21.5 frames per
+#: second of audio, every code below 4096.
+CODEBOOKS = 10
+CODE_LIMIT = 4096
+MAX_CODE_FRAMES = 2048  # ~95 s; the server's default context is 2048 rows in all
+#: Encoded references kept per process (clip-voice ids -> codes).
+CODES_CACHE = 64
+
 __all__ = [
     "NAME",
     "VOICE_FORMAT",
     "Drama3Tts",
+    "Drama3Voice",
     "PolyphaseResampler",
     "load",
     "parse_voice",
     "make_voice",
+    "make_voice_codes",
     "setup",
     "server_config",
 ]
@@ -102,12 +141,106 @@ NO_TRANSCRIPT = (
 )
 
 
-def parse_voice(data: bytes) -> DotsVoice:
-    """Validate ``dotstts-ref`` bytes for Drama 3: the clip AND its transcript."""
-    voice = _parse_ref(data)
-    if not voice.transcript:
+@dataclass(frozen=True)
+class Drama3Voice:
+    """A Drama 3 voice: the transcript and either a clip (encoded once) or
+    the reference's VQ codes (``vq_codes``, int32 ``(10, frames)``), or both."""
+
+    transcript: str
+    audio: np.ndarray | None  # float32 mono at ``rate``; None for a codes-only voice
+    rate: int
+    vq_codes: np.ndarray | None
+
+    @property
+    def seconds(self) -> float:
+        if self.audio is None:
+            return 0.0
+        return len(self.audio) / self.rate
+
+    def clip(self, max_s: float) -> DotsVoice:
+        """The clip cut to ``max_s`` as the dots container's voice (for ``wav()``)."""
+        assert self.audio is not None
+        limit = int(float(max_s) * self.rate)
+        audio = self.audio[:limit] if len(self.audio) > limit else self.audio
+        return DotsVoice(audio, self.rate, self.transcript)
+
+
+def make_voice_codes(
+    transcript: str,
+    vq_codes: np.ndarray,
+    audio: np.ndarray | None = None,
+    rate: int = TTS_SAMPLE_RATE,
+) -> bytes:
+    """``dotstts-ref`` bytes carrying the reference's VQ codes (no encode at use).
+    ``audio`` (a preview, or the clip the codes came from) is optional."""
+    codes = np.ascontiguousarray(np.asarray(vq_codes, np.int32))
+    _check_codes(codes)
+    buf = io.BytesIO()
+    arrays: dict[str, Any] = {
+        "format": np.array(VOICE_FORMAT),
+        "transcript": np.array(str(transcript or "")),
+        "vq_codes": codes,
+        "rate": np.array(int(rate), np.int64),
+    }
+    if audio is not None and len(audio):
+        arr = np.asarray(audio)
+        arrays["audio"] = np.ascontiguousarray(
+            float_to_pcm16(arr) if arr.dtype.kind == "f" else arr, "<i2")
+    else:
+        arrays["audio"] = np.zeros(0, "<i2")
+    np.savez(buf, **arrays)
+    return buf.getvalue()
+
+
+def _check_codes(codes: np.ndarray) -> None:
+    if codes.ndim != 2 or codes.shape[0] != CODEBOOKS or codes.shape[1] < 1:
+        raise BadRequest(
+            f"vq_codes: expected ({CODEBOOKS}, frames), got {tuple(codes.shape)}",
+            code="bad_voice")
+    if codes.shape[1] > MAX_CODE_FRAMES:
+        raise BadRequest(
+            f"vq_codes: {codes.shape[1]} frames; at most {MAX_CODE_FRAMES}", code="bad_voice")
+    if codes.dtype.kind not in "iu" or int(codes.min()) < 0 or int(codes.max()) >= CODE_LIMIT:
+        raise BadRequest(f"vq_codes: integers in [0, {CODE_LIMIT}) expected", code="bad_voice")
+
+
+def parse_voice(data: bytes) -> Drama3Voice:
+    """Validate ``dotstts-ref`` bytes for Drama 3: a clip AND its transcript, or
+    the transcript AND ``vq_codes`` (clip optional). Raises 400 ``bad_voice``."""
+    if len(data) > MAX_VOICE_BYTES:
+        raise BadRequest(f"voice file is larger than {MAX_VOICE_BYTES} bytes", code="bad_voice")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            total = sum(i.file_size for i in zf.infolist())
+        if total > MAX_INFLATED_BYTES:
+            raise BadRequest("voice file inflates too large", code="bad_voice")
+        with np.load(io.BytesIO(data), allow_pickle=False) as z:
+            names = set(z.files)
+            has_codes = "vq_codes" in names
+            codes = np.asarray(z["vq_codes"]) if has_codes else None
+            transcript = str(np.asarray(z["transcript"])) if "transcript" in names else ""
+            rate = int(np.asarray(z["rate"])) if "rate" in names else TTS_SAMPLE_RATE
+            audio = np.asarray(z["audio"]) if "audio" in names else None
+    except BadRequest:
+        raise
+    except Exception as exc:  # zipfile.BadZipFile, ValueError (pickled object), OSError
+        raise BadRequest(f"not a valid voice npz ({type(exc).__name__})", code="bad_voice") from exc
+    if not has_codes:
+        ref = _parse_ref(data)
+        if not ref.transcript:
+            raise BadRequest(NO_TRANSCRIPT, code="bad_voice")
+        return Drama3Voice(ref.transcript, ref.audio, ref.rate, None)
+    if not transcript.strip():
         raise BadRequest(NO_TRANSCRIPT, code="bad_voice")
-    return voice
+    assert codes is not None
+    _check_codes(codes)
+    clip: np.ndarray | None = None
+    if audio is not None and np.size(audio):
+        if audio.ndim != 1 or audio.dtype not in (np.dtype("<i2"), np.dtype("<f4")):
+            raise BadRequest("audio: expected mono int16 or float32", code="bad_voice")
+        clip = (audio.astype(np.float32) / 32768.0 if audio.dtype.kind == "i"
+                else np.asarray(audio, np.float32))
+    return Drama3Voice(transcript.strip(), clip, rate, np.ascontiguousarray(codes, np.int32))
 
 
 # ----------------------------------------------------------------------------- resampling
@@ -278,6 +411,12 @@ class _Backend:
             trust_env=False,
             follow_redirects=False,
         )
+        # Clip voices encoded once per process: voice id -> codes (S34).
+        self._codes: OrderedDict[str, list[list[int]]] = OrderedDict()
+        self._codes_lock = threading.Lock()
+        # The encode task takes a server-side PATH: the clip is written here
+        # for the call and removed after (loopback server, same machine).
+        self.ref_dir = Path(config.data_dir) / "drama3-refs"
         if self.spawn:
             self._spawn(config)
 
@@ -348,8 +487,88 @@ class _Backend:
         except Exception:  # noqa: BLE001 - not JSON
             return False
 
+    # -- voices --------------------------------------------------------------
+    def codes_for(self, voice: Drama3Voice, voice_id: str) -> list[list[int]]:
+        """The reference's VQ codes: from the file, or encoded once and cached."""
+        if voice.vq_codes is not None:
+            return voice.vq_codes.tolist()
+        if voice.audio is None:
+            raise RuntimeError(NO_TRANSCRIPT)
+        key = f"{voice_id}:{len(voice.audio)}:{voice.rate}:{float(self.cfg.max_ref_s)}"
+        with self._codes_lock:
+            hit = self._codes.get(key)
+            if hit is not None:
+                self._codes.move_to_end(key)
+                return hit
+        codes = self.encode_reference(voice.clip(self.cfg.max_ref_s), voice_id)
+        with self._codes_lock:
+            self._codes[key] = codes
+            while len(self._codes) > CODES_CACHE:
+                self._codes.popitem(last=False)
+        return codes
+
+    def encode_reference(self, clip: DotsVoice, voice_id: str) -> list[list[int]]:
+        """The server's ``encode_reference_only`` task (``POST /v1/tasks/run``):
+        the clip's VQ codes and nothing else, ~35-100 ms. The route takes a
+        server-side path, so the clip is written next to the data dir for the
+        call and deleted after."""
+        if not clip.transcript:
+            raise RuntimeError(NO_TRANSCRIPT)
+        self.ref_dir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(ch for ch in voice_id if ch.isalnum() or ch in "-_")[:80] or "ref"
+        path = self.ref_dir / f"{safe}-{os.getpid()}-{threading.get_ident()}.wav"
+        path.write_bytes(clip.wav())
+        try:
+            body = {
+                "model": MODEL_ID,
+                "request": {
+                    "text": "Prepare the reference.",
+                    "voice_ref": str(path),
+                    "options": {"reference_text": clip.transcript,
+                                "encode_reference_only": True},
+                },
+            }
+            r = self.client.post(f"{self.url}/v1/tasks/run", json=body)
+            if r.status_code != 200:
+                raise RuntimeError(
+                    f"drama3 server refused the reference encode ({r.status_code}): "
+                    f"{r.text[:300]}")
+            for art in r.json().get("artifacts") or []:
+                meta = art.get("meta") or {}
+                if str(meta.get("schema") or "").startswith("drama3_reference"):
+                    payload = json.loads(base64.b64decode(art["payload"]).decode("utf-8"))
+                    codes = np.asarray(payload["vq_codes"], np.int32)
+                    _check_codes(codes)
+                    return codes.tolist()
+            raise RuntimeError("drama3 server returned no drama3_reference artifact")
+        finally:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    def take(self, text: str, seed: int | None) -> tuple[np.ndarray, int, list[list[int]]]:
+        """One take in the model's own improvised voice (``POST /v1/tasks/run``,
+        no reference): ``(float32 audio, rate, codes)``. The codes are the voice."""
+        req: dict[str, Any] = {"text": text, "max_tokens": int(self.cfg.max_tokens)}
+        if seed is not None:
+            req["seed"] = int(seed)
+        r = self.client.post(f"{self.url}/v1/tasks/run", json={"model": MODEL_ID, "request": req})
+        if r.status_code != 200:
+            raise RuntimeError(f"drama3 server refused the take ({r.status_code}): {r.text[:300]}")
+        doc = r.json()
+        audio, rate = read_wav(base64.b64decode(doc["audio"]))
+        for art in doc.get("artifacts") or []:
+            meta = art.get("meta") or {}
+            if str(meta.get("schema") or "").startswith("drama3_take"):
+                payload = json.loads(base64.b64decode(art["payload"]).decode("utf-8"))
+                codes = np.asarray(payload["vq_codes"], np.int32)
+                _check_codes(codes)
+                return np.asarray(audio, np.float32), int(rate), codes.tolist()
+        raise RuntimeError("drama3 server returned no drama3_take artifact")
+
     # -- requests ----------------------------------------------------------
-    def _body(self, voice: DotsVoice | None, text: str, seed: int | None) -> dict[str, Any]:
+    def _body(
+        self, voice: Drama3Voice | None, voice_id: str, text: str, seed: int | None
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": MODEL_ID,
             "input": text,
@@ -358,28 +577,23 @@ class _Backend:
             "max_tokens": int(self.cfg.max_tokens),
         }
         if voice is not None:
-            # The server refuses a reference without its transcript (checked at
-            # parse time too; this is the belt for a voice built elsewhere).
             if not voice.transcript:
                 raise RuntimeError(NO_TRANSCRIPT)
-            clip = voice.audio
-            limit = int(float(self.cfg.max_ref_s) * voice.rate)
-            if len(clip) > limit:
-                clip = clip[:limit]
-            wav = DotsVoice(clip, voice.rate, voice.transcript).wav()
-            body["voice_ref"] = {"type": "base64", "data": base64.b64encode(wav).decode("ascii")}
-            body["reference_text"] = voice.transcript
+            # Codes, never audio: the server skips its encoder and the body is
+            # ~14 KB for a 12 s reference instead of ~800 KB.
+            body["options"] = {"references": [
+                {"text": voice.transcript, "vq_codes": self.codes_for(voice, voice_id)}]}
         if seed is not None:
             body["seed"] = int(seed)
         return body
 
     def synth(
-        self, voice: DotsVoice | None, voice_id: str, text: str, *, seed: int | None
+        self, voice: Drama3Voice | None, voice_id: str, text: str, *, seed: int | None
     ) -> Iterator[np.ndarray]:
-        """``voice=None`` speaks with the model's own built-in voice (warm-up)."""
+        """``voice=None`` speaks with the model's own improvised voice (warm-up)."""
         carry = b""
         with self.client.stream(
-            "POST", f"{self.url}/v1/audio/speech", json=self._body(voice, text, seed)
+            "POST", f"{self.url}/v1/audio/speech", json=self._body(voice, voice_id, text, seed)
         ) as resp:
             if resp.status_code != 200:
                 detail = resp.read()[:300].decode("utf-8", "replace")
@@ -397,6 +611,7 @@ class _Backend:
             "url": self.url,
             "model": MODEL_ID,
             "package": MODEL_PACKAGE,
+            "cached_voices": len(self._codes),
         }
         if self.model_path is not None:
             out["model_path"] = str(self.model_path)
@@ -442,8 +657,22 @@ class Drama3Tts:
     def last_stats(self) -> dict[str, Any]:
         return dict(self._last)
 
-    def parse_voice(self, data: bytes) -> DotsVoice:
+    def parse_voice(self, data: bytes) -> Drama3Voice:
         return parse_voice(data)
+
+    def take(self, text: str, seed: int | None = None) -> tuple[bytes, np.ndarray]:
+        """Keep this voice: one take in an improvised voice, returned as
+        ``(voice bytes, preview pcm16 at sample_rate)``. The voice file carries
+        the take's codes (no encode on use) and the preview as its clip."""
+        line = (text or "").strip()
+        if not line:
+            raise BadRequest("text is required", code="bad_request")
+        with self._lock:
+            audio, rate, codes = self.backend.take(line, seed)
+        preview = (resample_poly(audio, rate, self.sample_rate)
+                   if rate != self.sample_rate else audio)
+        voice = make_voice_codes(line, np.asarray(codes, np.int32), preview, self.sample_rate)
+        return voice, float_to_pcm16(preview)
 
     def build_voice(self, reference: np.ndarray, rate: int) -> bytes:
         """``POST /v1/voices/from-reference`` carries no transcript, and Drama 3
@@ -454,7 +683,7 @@ class Drama3Tts:
         self,
         text: str,
         voice_id: str,
-        voice: DotsVoice | None,
+        voice: Drama3Voice | None,
         *,
         stop: threading.Event | None = None,
         seed: int | None = None,
@@ -537,7 +766,7 @@ class Drama3Tts:
             time.sleep(0.005)
         return True
 
-    def render(self, text: str, voice: DotsVoice, *, seed: int | None = None) -> np.ndarray:
+    def render(self, text: str, voice: Drama3Voice, *, seed: int | None = None) -> np.ndarray:
         pieces = list(self.stream(text, "_render", voice, seed=seed))
         if not pieces:
             return np.zeros(0, "<i2")
@@ -557,6 +786,8 @@ class Drama3Tts:
             "native_sample_rate": self.backend.native_rate,
             "sample_rate": self.sample_rate,
             "voice_format": VOICE_FORMAT,
+            "voice_codes": True,   # the container may carry vq_codes; clips are encoded once
+            "keep_voice": True,    # take(): POST /v1/voices/surprise
             "text_stream": False,
         }
         out.update(self.backend.describe())

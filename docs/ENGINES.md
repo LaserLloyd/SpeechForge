@@ -464,9 +464,17 @@ no CPU offload, 23.3 GB resident; `docs/BENCHMARKS.md`, "Drama 3 through audio.c
 | cloned from a 12.6 s clip | 920-1070 ms | 0.46-0.91 |
 | cold load | 21.7 s | |
 
-The server **re-encodes the reference clip on every request** (about 70 ms per second of
-clip); it has no voice cache, so `tts.drama3.max_ref_s` (6 s) is the latency knob for cloned
-voices. Not run against the sf.1 gates or the listening test yet; not the live engine.
+Where the cloned-voice time goes (three agents read the port and the model's own code and
+measured it, 2026-10-15): the codec encode is already cached in the port and is NOT the cost.
+The backbone **re-reads the reference frames on every request** -- the port rebuilds the
+whole prompt (system text, `[Reference N]` rows, user turn) and pre-fills from position 0 --
+at about **2.4 ms per row, i.e. ~55 ms per second of reference** on top of ~110 ms for the
+text. Pre-encoded codes save only 40-130 ms and the 800 KB upload. So: a 6 s reference lands
+around 350-450 ms, a voice kept from a 2-3 s take around 300-350 ms, and ~200 ms for a long
+reference needs a per-voice prefix cache inside the port's backbone (below). The official
+runtime behaves the same way (SGLang-Omni runs with prefix caching off; a reference-code
+cache and prefix caching are on its roadmap). Not run against the sf.1 gates or the listening
+test yet; not the live engine.
 
 ### Install (`speechforge engine-setup drama3`)
 
@@ -506,12 +514,36 @@ residency owns its life (the lease decides when the process lives, `close()` ter
 `voice_ref` as a base64 WAV of the first `max_ref_s` seconds of the clip and
 `reference_text` as its transcript; the adapter resamples 44.1 kHz to 24 kHz with a
 streaming polyphase filter identical to `audio.resample_poly` (`PolyphaseResampler`) and
-yields 40 ms credit tokens like every other engine. Voices use the same
-`dotstts-ref` container as dots-tts (clip + transcript npz), so a client builds one file for
-every clip-cloning engine -- **with the transcript**: the server refuses a reference without
-`reference_text` (seen live), so a transcript-less file is refused at `PUT /v1/voices` with
-`bad_voice`, `POST /v1/voices/from-reference` is refused the same way, and the warm-up speaks
-with the model's built-in voice. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
+yields 40 ms credit tokens like every other engine.
+
+### Voices (S34)
+
+A Drama 3 voice is the reference's ten-codebook VQ grid (~21.5 frames per second of audio,
+codes below 4096) plus its transcript. The model has no built-in or seed-stable voice: with
+no reference it improvises a new timbre every take (the Studio's "Surprise"), and a fixed
+seed does not fix the timbre. Three ways to get one:
+
+| Way | How | Cost per request |
+| --- | --- | --- |
+| **Clip + transcript** | `PUT /v1/voices/<sha256>` with the `dotstts-ref` npz (`audio`, `rate`, `transcript`) -- the same file dots-tts takes. The engine encodes it ONCE per process through the server's `encode_reference_only` task (~35-100 ms, a server-side path written for the call and removed) and caches the codes (64 voices). | ~110 ms + ~55 ms per second of clip; `max_ref_s` (6 s) cuts the clip first |
+| **Codes only** | The same container with a `vq_codes` int32 `(10, frames)` array and the `transcript`; `audio` optional. `make_voice_codes()` builds it. No encode at all. | the same, by the number of frames |
+| **Keep this voice** | `POST /v1/voices/surprise {"text", "seed"}`: the engine speaks the text in an improvised voice (`POST /v1/tasks/run` with no reference), the take's own codes become a stored voice, and the reply carries the id and a 24 kHz preview WAV. Pick a short line (2-4 s) and keep the ones you like. | ~300-350 ms for a 2-3 s take |
+
+Every request then sends `options.references: [{text, vq_codes}]` -- never audio -- so the
+server skips its encoder and the body is ~14 KB for a 12 s reference instead of ~800 KB.
+A **transcript is mandatory**: the server refuses a reference without `reference_text` (seen
+live), so a transcript-less file is refused at `PUT /v1/voices` with `bad_voice` and
+`POST /v1/voices/from-reference` (a clip alone) is refused the same way; the warm-up speaks
+in an improvised voice. The codes depend on the codec checkpoint, which the Q4 package pins.
+Speaker tags: untagged text and references are speaker 0; the port accepts
+`<|speaker:0|>`..`<|speaker:15|>` but SpeechForge sends one voice per context.
+
+What would make long references fast (the lead for a patch to the port, not written here):
+split the prompt into a per-voice prefix (system text + reference rows) and a per-request
+suffix, save the backbone state after the prefix (the 10 full-attention layers' KV rows, the
+30 Gated-DeltaNet states and their convolution tails, ~80 MB per voice), and pre-fill only the
+suffix (~35-45 rows, ~120-150 ms) on a cache hit. A second lead: 2.4 ms per row is slow for a
+5090, so the pre-fill path itself (batching, CUDA graphs) is worth profiling. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
 `threads`, `cpu_expert_layers` (VRAM offload; 4 for a 24 GB card), `context_length`,
 `max_tokens`, `max_ref_s`, `output_rate`, `startup_timeout_s`, `http_timeout_s`.
 
@@ -534,9 +566,8 @@ with the model's built-in voice. `tts.drama3.*` keys: `port`, `server_exe`, `mod
 
 ### Open questions
 
-- Reference caching: the port encodes the clip per request. Pre-encoded `vq_codes` are
-  accepted in `references`, so a one-time encode per voice would bring cloned first audio
-  back to ~200 ms; the port exposes no encode route yet.
+- The per-voice prefix cache (above) is the one change that gets a long reference to
+  ~200 ms; until then keep references short or keep voices from short takes.
 - The port is marked experimental: some emotion tags run long or drop words (observed by its
   author on every package). A listening test against Chatterbox and Qwen3-TTS is pending.
 - A 3090 (24 GB) needs `cpu_expert_layers: 4` or the Q3 package; neither is measured here.

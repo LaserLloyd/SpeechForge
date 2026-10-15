@@ -33,6 +33,7 @@ StudioForge unreachable and the card not clearly free), `gpu_vacated`, `load_fai
 | `GET /v1/voices` | token | stored ids (audit) |
 | `DELETE /v1/voices/<sha256>` | token | `{deleted}` |
 | `POST /v1/voices/from-reference` | token | **403 `reference_clip_disabled`** unless `voices.allow_reference_clip` (decision D3: reference clips stay on the box) |
+| `POST /v1/voices/surprise` | token | keep an improvised voice (S34): `{"text", "seed"}` -> 201 `{id, text, audio_ms, preview_wav_base64}`; **403 `reference_clip_disabled`** unless `voices.allow_reference_clip`; **501 `unsupported`** on an engine without improvised voices (only `drama3-tts` has them) |
 | `POST /internal/vacate` | loopback + StudioForge's lease token | StudioForge D56 callback; 202 at once, drains after |
 
 ## Voice conditionals
@@ -42,6 +43,16 @@ The four Chatterbox speech-encoder tensors as an `.npz` -- `cond_emb` (1, N, 102
 or the encoder's own names (`audio_features`, `audio_tokens`). Loaded with
 `allow_pickle=False`, zip-size-checked, shape/dtype/range/finite validated. Stored in
 `voices.dir` (Windows default `%LOCALAPPDATA%\SpeechForge\voices`, user-only ACL, not indexed).
+
+## Improvised voices (`POST /v1/voices/surprise`)
+
+For an engine that improvises a voice when given no reference (Drama 3): the body
+`{"text": "<1-500 characters>", "seed": <int or null>}` is spoken in a new voice, the take's
+own codes are stored as a voice file (`dotstts-ref` with `vq_codes`, no clip), and the reply
+is `201 {id: "sha256:<id>", text, audio_ms, preview_wav_base64}` (the preview at the engine's
+rate, 24 kHz). Speak the text you keep with `voice: "sha256:<id>"`. Off unless
+`voices.allow_reference_clip` (the opt-in the clip-cloning engines need, decision D3); an
+engine without the feature answers `501 unsupported`. See `docs/ENGINES.md`, "Voices (S34)".
 
 ## Reference clips (`POST /v1/voices/from-reference`)
 

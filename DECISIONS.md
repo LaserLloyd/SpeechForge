@@ -572,3 +572,29 @@ re-encodes the reference every request.
 - *Not the live engine.* Chatterbox stays on the 3090; Drama 3 needs a 32 GB card or
   `cpu_expert_layers`. The gates, the listening test and a reference-code cache are the
   next steps before a switch.
+
+## S34 -- A Drama 3 voice is its codes; clips are encoded once, takes are kept (2026-10-15)
+
+**Context.** Cloned voices on the Drama 3 engine paid ~0.9 s before first audio. Three agents
+established why: the port's codec encode is cached and cheap; the cost is the backbone
+pre-filling every reference row again on every request (~2.4 ms per row, ~55 ms per second
+of clip), and the official runtime does the same (prefix caching off). The model has no
+built-in or seed-stable voice: with no reference it improvises one per take.
+
+**Decision.**
+
+- *The voice object is the VQ grid plus the transcript.* The `dotstts-ref` container gains
+  an optional `vq_codes` int32 `(10, frames)` array; a clip file is encoded once per process
+  through the server's `encode_reference_only` task (a server-side path, written for the
+  call and removed) and cached per voice id; a codes file needs no encode. Every request
+  carries `options.references: [{text, vq_codes}]`, never audio: the encoder is skipped and
+  the body shrinks from ~800 KB to ~14 KB. The transcript stays mandatory.
+- *Keep this voice.* `take()` on the engine and `POST /v1/voices/surprise` on the server:
+  one take in an improvised voice through the port's task route, the take's own codes stored
+  as a codes-only voice with a 24 kHz preview, the id returned. A kept 2-3 s take speaks in
+  ~300-350 ms, which is the practical way to a fast cloned-sounding voice today.
+- *The latency knob is reference length,* so `max_ref_s` stays at 6 s (~450 ms) and the
+  docs state the 110 ms + 55 ms/s model instead of promising ~200 ms.
+- *Not done here:* the per-voice backbone prefix cache in the port (saved state after the
+  reference rows, suffix-only pre-fill) is the one change that reaches ~200 ms with long
+  references; it is a C++ patch to audio.cpp, documented as the lead in ENGINES.md.

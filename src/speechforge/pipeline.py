@@ -28,6 +28,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from speechforge.audio import crossfade, float_to_pcm16
+from speechforge.errors import SpeechError
 from speechforge.voices import VoiceTensors
 
 CROSSFADE_SAMPLES = 24000 * 20 // 1000
@@ -430,6 +431,20 @@ class Speaker:
 
     def build_voice(self, reference: np.ndarray, rate: int) -> bytes:
         return self.tts.build_voice(reference, rate)
+
+    def take(self, text: str, seed: int | None = None) -> tuple[bytes, np.ndarray]:
+        """Keep this voice (S34): an engine that improvises voices returns one
+        take as ``(voice bytes, preview pcm16)``; the others answer 501."""
+        take = getattr(self.tts, "take", None)
+        if take is None:
+            raise SpeechError(
+                f"the {getattr(self.tts, 'name', 'tts')} engine has no improvised voices",
+                code="unsupported", status_code=501)
+        return take(text, seed)
+
+    @property
+    def sample_rate(self) -> int:
+        return int(self.tts.sample_rate)
 
     def warm_up(self) -> dict[str, Any]:
         """Exercise every session once so the arenas reach their working size

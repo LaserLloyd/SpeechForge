@@ -17,6 +17,7 @@ HEAD/GET /v1/voices/{sha256}                token       200 present / 404
 GET  /v1/voices                             token       the stored ids (audit)
 DELETE /v1/voices/{sha256}                  token       forget a voice
 POST /v1/voices/from-reference              token       403 unless voices.allow_reference_clip (D3)
+POST /v1/voices/surprise                    token       keep an improvised voice (take())
 POST /internal/vacate                       loopback +  StudioForge D56 vacate callback
                                             lease token
 ==========================================  ==========  ===========================================
@@ -29,6 +30,7 @@ peers are served (and ``validate_for_serving`` refuses a non-loopback bind).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import secrets
@@ -507,6 +509,46 @@ def create_app(
             data = await asyncio.to_thread(speaker.build_voice, audio, TTS_SAMPLE_RATE)
         vid = await asyncio.to_thread(voices.put_bytes, data)
         return JSONResponse({"id": f"sha256:{vid}", "clip": clip}, status_code=201)
+
+    @app.post("/v1/voices/surprise")
+    async def voice_surprise(request: Request) -> JSONResponse:
+        """Keep this voice (S34): the engine speaks ``text`` in a voice it improvises
+        and the take's own codes become a stored voice, with no clip anywhere.
+        Body JSON: ``{"text": "...", "seed": 123}``. Only engines that offer
+        ``take()`` (Drama 3); ``501 unsupported`` otherwise. Off unless
+        ``voices.allow_reference_clip`` (the same owner opt-in those engines need)."""
+        authorize(request)
+        if not config.voices.allow_reference_clip:
+            raise Forbidden(
+                "voices.allow_reference_clip is off, so no clip-cloning engine is loaded",
+                code="reference_clip_disabled",
+            )
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            raise BadRequest("body must be a JSON object", code="bad_request")
+        text = str(payload.get("text") or "").strip()
+        if not 1 <= len(text) <= 500:
+            raise BadRequest("text: 1-500 characters", code="bad_request")
+        seed = payload.get("seed")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise BadRequest("seed: integer or null", code="bad_request")
+        speaker = residency.require()
+        async with residency.use():
+            voice_bytes, preview = await asyncio.to_thread(speaker.take, text, seed)
+        vid = await asyncio.to_thread(voices.put_bytes, voice_bytes)
+        rate = int(getattr(speaker, "sample_rate", TTS_SAMPLE_RATE))
+        return JSONResponse(
+            {
+                "id": f"sha256:{vid}",
+                "text": text,
+                "audio_ms": int(len(preview) * 1000 / rate),
+                "preview_wav_base64": base64.b64encode(wav_bytes(preview, rate)).decode("ascii"),
+            },
+            status_code=201,
+        )
 
     # ------------------------------------------------------------ vacate (D56)
     @app.post("/internal/vacate")

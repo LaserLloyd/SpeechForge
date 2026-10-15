@@ -28,6 +28,7 @@ from speechforge.engines.drama3_tts import (
     Drama3Tts,
     PolyphaseResampler,
     make_voice,
+    make_voice_codes,
     parse_voice,
     server_config,
 )
@@ -115,8 +116,50 @@ def test_server_config_is_the_servers_own_shape(tmp_path):
     json.dumps(doc)  # serialisable
 
 
+
+
+# ----------------------------------------------------------------------------- a fake server
+CODES = [[(i * 7 + j) % 4096 for j in range(43)] for i in range(10)]   # 2 s at 21.5 fps
+
+
+def fake_server(pcm: bytes, *, log: list | None = None, take_codes=None, take_wav: bytes = b""):
+    """MockTransport handler: the speech route streams ``pcm``; the tasks route
+    answers an encode-only request with a drama3_reference artifact and a plain
+    take with audio + a drama3_take artifact. Every request body is appended to
+    ``log`` as ``(path, body)``."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content) if request.content else {}
+        if log is not None:
+            log.append((path, body))
+        if path == "/v1/audio/speech":
+            return httpx.Response(200, stream=httpx.ByteStream(pcm))
+        if path == "/v1/tasks/run":
+            opts = (body.get("request") or {}).get("options") or {}
+            if opts.get("encode_reference_only"):
+                payload = {"text": opts.get("reference_text", ""), "vq_codes": CODES}
+                return httpx.Response(200, json={"artifacts": [{
+                    "id": "drama3_reference_0", "kind": "acoustic_tokens",
+                    "payload": base64.b64encode(json.dumps(payload).encode()).decode(),
+                    "meta": {"family": "fish_drama3", "schema": "drama3_reference_v1"}}]})
+            payload = {"text": body["request"]["text"], "vq_codes": take_codes or CODES}
+            return httpx.Response(200, json={
+                "audio": base64.b64encode(take_wav).decode(), "sample_rate": 44100,
+                "artifacts": [{
+                    "id": "drama3_take", "kind": "acoustic_tokens",
+                    "payload": base64.b64encode(json.dumps(payload).encode()).decode(),
+                    "meta": {"family": "fish_drama3", "schema": "drama3_take_v1"}}]})
+        return httpx.Response(404)
+
+    return handler
+
 # ----------------------------------------------------------------------------- the http backend
-def test_http_backend_sends_the_clip_as_base64_and_streams_pcm(tmp_path, voice):
+def test_http_backend_encodes_a_clip_once_and_sends_codes(tmp_path, voice):
+    """A clip voice is encoded ONCE through the server's encode_reference_only
+    task (a server-side path, removed after) and every request carries the
+    codes in options.references -- never the audio (S34)."""
     import httpx
 
     config = _config(tmp_path, max_ref_s=1.0)
@@ -125,26 +168,34 @@ def test_http_backend_sends_the_clip_as_base64_and_streams_pcm(tmp_path, voice):
     try:
         assert be.client.trust_env is False and be.client.follow_redirects is False
         assert be.spawn is False and be.process is None
-        seen: list[dict] = []
+        seen: list = []
         pcm = (np.arange(-5, 6, dtype="<i2") * 1000).tobytes() + b"\x07"
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append({"url": str(request.url), "body": json.loads(request.content)})
-            return httpx.Response(200, stream=httpx.ByteStream(pcm))
-
-        be.client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
+        be.client = httpx.Client(transport=httpx.MockTransport(fake_server(pcm, log=seen)),
+                                 trust_env=False)
         out = np.concatenate(list(be.synth(voice, "v1", "Hello.", seed=3)))
         assert len(out) == 11 and out.dtype == np.float32
-        assert seen[0]["url"] == "http://127.0.0.1:8035/v1/audio/speech"
-        body = seen[0]["body"]
+        paths = [path for path, _ in seen]
+        assert paths == ["/v1/tasks/run", "/v1/audio/speech"]
+        enc = seen[0][1]["request"]
+        assert enc["options"] == {"reference_text": voice.transcript,
+                                  "encode_reference_only": True}
+        assert enc["voice_ref"].startswith(str(be.ref_dir)) and not Path(enc["voice_ref"]).exists()
+        body = seen[1][1]
         assert body["model"] == MODEL_ID and body["input"] == "Hello."
         assert body["response_format"] == "pcm" and body["stream_format"] == "audio"
         assert body["seed"] == 3 and body["max_tokens"] == 800
-        assert body["reference_text"] == voice.transcript
-        wav = base64.b64decode(body["voice_ref"]["data"])
-        assert body["voice_ref"]["type"] == "base64" and wav[:4] == b"RIFF"
-        # max_ref_s cut the 2 s clip to 1 s: 24000 samples * 2 bytes + the 44-byte header
-        assert len(wav) == 44 + 24000 * 2
+        assert "voice_ref" not in body and "reference_text" not in body
+        (ref,) = body["options"]["references"]
+        assert ref["text"] == voice.transcript and ref["vq_codes"] == CODES
+        # Second request: no encode, the cache answers.
+        list(be.synth(voice, "v1", "Again.", seed=None))
+        assert [path for path, _ in seen][2:] == ["/v1/audio/speech"]
+        assert be.describe()["cached_voices"] == 1
+        # A codes-only voice never touches the encode task.
+        kept = parse_voice(make_voice_codes("Kept.", np.array(CODES)))
+        list(be.synth(kept, "kept", "Line.", seed=None))
+        assert seen[-1][0] == "/v1/audio/speech"
+        assert seen[-1][1]["options"]["references"][0]["vq_codes"] == CODES
 
         def refuse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(503, text="server_busy")
@@ -152,6 +203,57 @@ def test_http_backend_sends_the_clip_as_base64_and_streams_pcm(tmp_path, voice):
         be.client = httpx.Client(transport=httpx.MockTransport(refuse), trust_env=False)
         with pytest.raises(RuntimeError, match="503"):
             list(be.synth(voice, "v1", "Hello.", seed=None))
+    finally:
+        be.close()
+
+
+def test_codes_container_roundtrip_and_validation():
+    data = make_voice_codes("Kept take.", np.array(CODES), clip(0.5), 24000)
+    v = parse_voice(data)
+    assert v.transcript == "Kept take." and v.vq_codes.shape == (10, 43)
+    assert v.audio is not None and abs(v.seconds - 0.5) < 1e-6
+    bare = parse_voice(make_voice_codes("No clip.", np.array(CODES)))
+    assert bare.audio is None and bare.seconds == 0.0
+    from speechforge.errors import BadRequest
+
+    with pytest.raises(BadRequest, match="transcript"):
+        parse_voice(make_voice_codes("", np.array(CODES)))
+    with pytest.raises(BadRequest, match="frames"):
+        make_voice_codes("x", np.zeros((9, 5), np.int32))
+    with pytest.raises(BadRequest, match="integers"):
+        make_voice_codes("x", np.full((10, 5), 4096, np.int32))
+    with pytest.raises(BadRequest, match="at most"):
+        make_voice_codes("x", np.zeros((10, 3000), np.int32))
+
+
+def test_take_keeps_an_improvised_voice(tmp_path):
+    """take(): one request on /v1/tasks/run with no reference; the take's own
+    codes become a codes-only voice and the audio comes back at 24 kHz."""
+    import httpx
+
+    from speechforge.audio import wav_bytes
+
+    native = (np.sin(np.arange(44100) * 2 * np.pi * 300 / 44100) * 0.4).astype(np.float32)
+    wav = wav_bytes((native * 32767).astype("<i2"), 44100)
+    seen: list = []
+    be = drama3_tts._Backend(_config(tmp_path), 1)
+    try:
+        be.client = httpx.Client(
+            transport=httpx.MockTransport(fake_server(b"", log=seen, take_wav=wav)),
+            trust_env=False)
+        tts = Drama3Tts(be)
+        voice_bytes, preview = tts.take("Hello from a stranger.", seed=9)
+        assert seen == [("/v1/tasks/run", {"model": MODEL_ID, "request": {
+            "text": "Hello from a stranger.", "max_tokens": 800, "seed": 9}})]
+        assert preview.dtype == np.int16 and abs(len(preview) - 24000) <= 1
+        v = parse_voice(voice_bytes)
+        assert v.transcript == "Hello from a stranger." and v.vq_codes.tolist() == CODES
+        assert v.rate == 24000 and v.audio is not None and abs(v.seconds - 1.0) < 1e-3
+        from speechforge.errors import BadRequest
+
+        with pytest.raises(BadRequest):
+            tts.take("   ")
+        assert tts.describe()["keep_voice"] is True
     finally:
         be.close()
 
@@ -165,10 +267,7 @@ def test_adapter_streams_24k_pcm16_with_stats_and_gate(tmp_path, voice):
         native = (np.sin(np.arange(44100) * 2 * np.pi * 300 / 44100) * 0.4).astype(np.float32)
         pcm = (native * 32767).astype("<i2").tobytes()
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, stream=httpx.ByteStream(pcm))
-
-        be.client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
+        be.client = httpx.Client(transport=httpx.MockTransport(fake_server(pcm)), trust_env=False)
         tts = Drama3Tts(be, output_rate=24000)
         assert tts.sample_rate == 24000 and tts.voice_format == VOICE_FORMAT
         gates: list[int] = []
@@ -205,10 +304,7 @@ def test_stop_event_cuts_the_stream(tmp_path, voice):
     be = drama3_tts._Backend(_config(tmp_path), 1)
     try:
         pcm = np.zeros(44100 * 3, "<i2").tobytes()
-        be.client = httpx.Client(
-            transport=httpx.MockTransport(
-                lambda r: httpx.Response(200, stream=httpx.ByteStream(pcm))),
-            trust_env=False)
+        be.client = httpx.Client(transport=httpx.MockTransport(fake_server(pcm)), trust_env=False)
         tts = Drama3Tts(be)
         stop = threading.Event()
         got = 0
@@ -232,24 +328,21 @@ def test_a_voice_needs_its_transcript(tmp_path, voice):
         parse_voice(make_voice(clip(), 24000, ""))
     be = drama3_tts._Backend(_config(tmp_path), 1)
     try:
-        seen: list[dict] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append(json.loads(request.content))
-            return httpx.Response(200, stream=httpx.ByteStream(b"\x00\x00" * 4410))
-
-        be.client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
+        seen: list = []
+        be.client = httpx.Client(
+            transport=httpx.MockTransport(fake_server(b"\x00\x00" * 4410, log=seen)),
+            trust_env=False)
         tts = Drama3Tts(be)
         with pytest.raises(BadRequest, match="transcript"):
             tts.build_voice(clip(5.0, TTS_SAMPLE_RATE), TTS_SAMPLE_RATE)
         tts.warm_up()
-        assert "voice_ref" not in seen[-1] and "reference_text" not in seen[-1]
-        assert seen[-1]["input"] == "Warming up the voice."
-        bare = drama3_tts.DotsVoice(clip(), 24000, "")
+        assert "options" not in seen[-1][1] and "voice_ref" not in seen[-1][1]
+        assert seen[-1][1]["input"] == "Warming up the voice."
+        bare = drama3_tts.Drama3Voice("", clip(), 24000, None)
         with pytest.raises(RuntimeError, match="transcript"):
             list(tts.stream("x", "bare", bare))
         list(tts.stream("y", "v1", voice))
-        assert seen[-1]["reference_text"] == voice.transcript
+        assert seen[-1][1]["options"]["references"][0]["text"] == voice.transcript
     finally:
         be.close()
 

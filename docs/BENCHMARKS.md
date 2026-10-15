@@ -505,3 +505,25 @@ The reference clip is encoded on every request -- `voice_dir` does not cache it 
 cuts clips to `max_ref_s` (6 s) for that reason. The dramatic rendering varies a lot by take:
 the same 127-character line produced 17.7 s with pauses and 7.8 s cloned. Listening takes are
 in the private quality folder (`quality-2026-10-15-drama3/`).
+
+### Where the cloned-voice time goes (2026-10-15, three agents)
+
+Same binary and card, server `--log` timing per request. The port already caches the last
+encoded reference (one entry, exact-waveform key): first-ever encode 629 ms, cache hit 35 ms,
+re-encode after another voice evicted it ~100 ms (12.6 s clip) / 43 ms (3 s clip). The rest
+is the backbone pre-fill of the whole prompt, rebuilt from position 0 on every request:
+
+| Prompt rows | Backbone pre-fill | First audio |
+| --- | --- | --- |
+| 30-35 (no reference) | 110-141 ms | 138-211 ms |
+| 108-130 (3 s reference) | 266-363 ms | 296-403 ms |
+| 366-371 (12.6 s reference) | 854-993 ms | 885-1073 ms |
+
+About 2.4 ms per row. Pre-encoded `vq_codes` in `options.references` (skips the encoder,
+14 KB body instead of 808 KB): 12.6 s reference 893-966 ms vs 903-1048 ms with `voice_ref`;
+3 s reference 361-377 ms vs 386-459 ms. A voice kept from a 55-frame take and sent as
+`references`: 358-377 ms; as `previous_takes`: 312-351 ms. The repo's own smoke test asserts
+byte-identical audio between inline audio and prepared codes. Seeds do not reproduce on the
+streaming HTTP server (they do on the CLI). The selftest clip's transcript used in the earlier
+cloning rows above was wrong (the golden text in `selftest.py` is the right one); the rows in
+this section used the right one.
