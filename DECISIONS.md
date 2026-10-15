@@ -615,3 +615,22 @@ Same source, no patch: pre-fill 0.15 ms per row, a 12.6 s reference to first aud
 listening test says so). The change to offer the port upstream is `ggml_argsort_top_k` at
 `backbone.cpp:413`, which would make every toolkit equally fast; the per-voice prefix cache
 of S34 is now worth ~60-90 ms and was not written.
+
+## S36 -- The per-voice prefix cache ships as a patch to the port (2026-10-15)
+
+**Context.** After S35 a repeated cloned request still re-pre-filled its reference rows
+(136-152 ms to first audio for 12.6 s). An agent wrote the prefix cache sketched in S34:
+split the prompt at the end of the reference blocks, keep the backbone and audio-tower state
+after that prefix on the device per voice, pre-fill only the suffix on a hit. Measured: 79 ms
+at the server, 95-107 ms through the adapter, byte-identical audio cold vs cached, ~85 MiB
+per voice, ~50 ms more on a voice's first request.
+
+**Decision.** Ship it as `engines/patches/audiocpp-drama3-prefix-cache.patch` (SpeechForge's
+own code, MIT, on top of the Apache-2.0 port, pinned to `AUDIOCPP_COMMIT`); `engine-setup`
+applies it with `git apply` before building (`--no-prefix-cache` for the stock port), the
+generated server config carries `fish_drama3.prefix_cache_entries` only when
+`tts.drama3.prefix_cache` is true (a stock server refuses the option), and the host runs the
+patched 13.1 build. Offer the patch upstream together with the `ggml_argsort_top_k` change;
+when the port carries both, the shipped patch and the toolkit preference go away. Not done:
+a single-pass pre-fill that snapshots mid-way (would remove the cold penalty), a memory
+budget instead of an entry count, snapshots across restarts.

@@ -220,6 +220,14 @@ class Drama3TtsConfig(_Section):
     max_ref_s: float = Field(6.0, ge=1.0, le=20.0)
     #: 24000 resamples the model's 44.1 kHz to the sf.1 frame rate.
     output_rate: Literal[24000, 44100] = 24000
+    #: The per-voice prompt-prefix cache (S36): the port keeps the backbone and
+    #: audio-tower state after a voice's reference rows on the device (~85 MiB
+    #: per voice) and pre-fills only the request on a hit. Needs the patch
+    #: ``engine-setup`` applies; a build without it refuses the option, so set
+    #: this false for a stock audio.cpp server. Entries: most recently used
+    #: voices kept; 0 turns the cache off in a patched build.
+    prefix_cache: bool = True
+    prefix_cache_entries: int = Field(4, ge=0, le=64)
 
     @field_validator("url")
     @classmethod

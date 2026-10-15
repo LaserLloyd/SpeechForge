@@ -108,6 +108,11 @@ MODEL_FILE = "drama-3-backbone-8bit-experts-Q4_K_S.gguf"
 MODEL_SIZE = 24596497888  # bytes; checked at spawn (a full hash is setup's job)
 # sha256 of the package file, measured 2026-10-15 after the model-manager install.
 MODEL_SHA256 = "05af716baf78e7c20863b9ccebb3ebdeca9607dd3ea7d0b72c35079e675b212b"
+#: The per-voice prompt-prefix cache for the port (S36), shipped as a patch
+#: against ``AUDIOCPP_COMMIT`` and applied by ``engine-setup``. SpeechForge's
+#: own code (MIT) on top of audio.cpp (Apache-2.0); offered upstream.
+PREFIX_CACHE_PATCH = Path(__file__).with_name("patches") / "audiocpp-drama3-prefix-cache.patch"
+
 MODEL_LICENCE = (
     "Fish Audio Community License v1.0 (commercial terms at fish.audio above USD 500k revenue)"
 )
@@ -377,6 +382,10 @@ def server_config(config: Any, model_path: Path, *, port: int | None = None) -> 
                 "session_options": {
                     "fish_drama3.cpu_expert_layers": int(cfg.cpu_expert_layers),
                     "fish_drama3.context_length": int(cfg.context_length),
+                    # Only a patched build knows the option (S36); a stock one
+                    # refuses it, so `prefix_cache: false` keeps it out.
+                    **({"fish_drama3.prefix_cache_entries": int(cfg.prefix_cache_entries)}
+                       if cfg.prefix_cache else {}),
                 },
                 "default_request_options": {"max_tokens": int(cfg.max_tokens)},
             }
@@ -876,6 +885,7 @@ def setup(
     install_model: bool = True,
     cuda_toolkit: Path | None = None,
     cuda_arch: str = "auto",
+    prefix_cache: bool = True,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """``speechforge engine-setup drama3``: the port's own setup, driven.
@@ -889,7 +899,9 @@ def setup(
        <models>/audiocpp`` -- the port downloads and places the GGUF.
 
     The build uses CUDA 13.1 when it is installed (``cuda_toolkit`` names
-    another root; see ``PREFERRED_CUDA``) and says so when it is not.
+    another root; see ``PREFERRED_CUDA``) and says so when it is not, and
+    applies the shipped prefix-cache patch first (``prefix_cache=False`` builds
+    the stock port; then set ``tts.drama3.prefix_cache: false``).
     Prints what is missing (git, cmake, nvcc, Visual Studio Build Tools)
     instead of guessing. Returns the paths to put in ``config.yaml``.
     """
@@ -912,6 +924,7 @@ def setup(
         _run(["git", "fetch", "--depth", "1", "origin", AUDIOCPP_COMMIT], cwd=root, log=log)
         _run(["git", "checkout", "--quiet", AUDIOCPP_COMMIT], cwd=root, log=log)
 
+    patched = apply_prefix_cache_patch(root, log=log) if prefix_cache else False
     toolkit = cuda_toolkit or (find_cuda_toolkit() if build else None)
     if build:
         if toolkit is None:
@@ -956,6 +969,7 @@ def setup(
         "root": str(root),
         "commit": head,
         "cuda_toolkit": str(toolkit) if toolkit else "",
+        "prefix_cache_patch": patched,
         "server_exe": str(exe),
         "server_exe_exists": exe.is_file(),
         "model_path": str(model),
@@ -971,9 +985,32 @@ def setup(
     log("      backend: spawn")
     log(f"      server_exe: {exe}")
     log(f"      model_path: {model}")
+    log(f"      prefix_cache: {'true' if patched else 'false'}")
     log("  voices:")
     log("    allow_reference_clip: true   # D3: this engine clones from the clip itself")
     return out
+
+
+def apply_prefix_cache_patch(root: Path, *, log: Callable[[str], None] = print) -> bool:
+    """``git apply`` the shipped prefix-cache patch to the checkout at ``root``;
+    True when the tree carries it afterwards (already applied counts)."""
+    patch = PREFIX_CACHE_PATCH
+    if not patch.is_file():
+        log(f"note: {patch.name} is not in this install; building the stock port")
+        return False
+    applied = subprocess.run(["git", "apply", "--check", "--reverse", str(patch)],
+                             cwd=str(root), capture_output=True)
+    if applied.returncode == 0:
+        log("prefix-cache patch already applied")
+        return True
+    check = subprocess.run(["git", "apply", "--check", str(patch)], cwd=str(root),
+                           capture_output=True, text=True)
+    if check.returncode != 0:
+        log(f"note: the prefix-cache patch does not apply to this checkout "
+            f"({check.stderr.strip()[:200]}); building the stock port")
+        return False
+    _run(["git", "apply", str(patch)], cwd=root, log=log)
+    return True
 
 
 def _sha256(path: Path) -> str:

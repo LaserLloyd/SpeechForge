@@ -1,0 +1,835 @@
+diff --git a/include/engine/community_models/fish_drama3/backbone.h b/include/engine/community_models/fish_drama3/backbone.h
+index 82d0d39..7b37446 100644
+--- a/include/engine/community_models/fish_drama3/backbone.h
++++ b/include/engine/community_models/fish_drama3/backbone.h
+@@ -11,6 +11,8 @@
+ 
+ namespace engine::models::fish_drama3 {
+ 
++class Drama3StateSnapshot;
++
+ struct Drama3BackboneDecoderConfig {
+     int64_t vocab_size = 252288;
+     int64_t hidden_size = 2048;
+@@ -71,6 +73,17 @@ public:
+         virtual Drama3BackboneDecoderForwardResult prefill_embeddings(
+             const std::vector<float> & embeddings,
+             int64_t steps) = 0;
++        // Prefills rows that follow the rows already in the session (for
++        // example a restored prompt prefix). Equivalent to prefill_embeddings
++        // when the session is empty.
++        virtual Drama3BackboneDecoderForwardResult prefill_continue(
++            const std::vector<float> & embeddings,
++            int64_t steps) = 0;
++        // Device copy of all state later rows depend on (KV rows and linear
++        // attention state) for the current valid_steps(); restore_state puts
++        // it back and sets valid_steps() to the saved length.
++        virtual std::shared_ptr<Drama3StateSnapshot> save_state() = 0;
++        virtual void restore_state(const Drama3StateSnapshot & state) = 0;
+         virtual std::vector<float> run_embedding_step(const std::vector<float> & embedding) = 0;
+         virtual int64_t valid_steps() const noexcept = 0;
+     };
+diff --git a/include/engine/community_models/fish_drama3/generator.h b/include/engine/community_models/fish_drama3/generator.h
+index b0dd3e1..a96a069 100644
+--- a/include/engine/community_models/fish_drama3/generator.h
++++ b/include/engine/community_models/fish_drama3/generator.h
+@@ -3,6 +3,7 @@
+ #include "engine/community_models/fish_drama3/prompt.h"
+ 
+ #include <functional>
++#include <list>
+ #include <optional>
+ 
+ namespace engine::models::fish_drama3 {
+@@ -43,6 +44,19 @@ private:
+     std::unique_ptr<codecs::FishDacCodecRuntime> codec_;
+     std::optional<runtime::AudioBuffer> cached_reference_audio_;
+     codecs::FishDacCodes cached_reference_codes_;
++
++    // Per-voice prompt prefix cache. The key is the exact prefix rows (system
++    // text plus every reference's text tokens and VQ codes); the value is the
++    // backbone and tower state after prefilling those rows. A hit restores
++    // the state and prefills only the request suffix.
++    struct PrefixCacheEntry {
++        uint64_t hash = 0;
++        std::vector<Drama3Frame> prefix;
++        std::shared_ptr<Drama3StateSnapshot> backbone;
++        std::shared_ptr<Drama3StateSnapshot> tower;
++    };
++    size_t prefix_cache_capacity_ = 4;
++    std::list<PrefixCacheEntry> prefix_cache_;
+ };
+ 
+ }  // namespace engine::models::fish_drama3
+diff --git a/include/engine/community_models/fish_drama3/prompt.h b/include/engine/community_models/fish_drama3/prompt.h
+index a0b2f5d..b2b7df6 100644
+--- a/include/engine/community_models/fish_drama3/prompt.h
++++ b/include/engine/community_models/fish_drama3/prompt.h
+@@ -14,6 +14,7 @@ void validate_drama3_text(const std::string & text, const char * location);
+ void validate_drama3_codes(const codecs::FishDacCodes & codes, int64_t codebook_size);
+ std::vector<Drama3Frame> build_drama3_prompt(const Drama3Assets & assets,
+     const Drama3TextTokenizer & tokenizer, const std::string & text,
+-    const std::vector<Drama3Take> & references, const std::vector<Drama3Take> & history);
++    const std::vector<Drama3Take> & references, const std::vector<Drama3Take> & history,
++    size_t * prefix_rows = nullptr);
+ 
+ }  // namespace engine::models::fish_drama3
+diff --git a/include/engine/community_models/fish_drama3/state_snapshot.h b/include/engine/community_models/fish_drama3/state_snapshot.h
+new file mode 100644
+index 0000000..112639d
+--- /dev/null
++++ b/include/engine/community_models/fish_drama3/state_snapshot.h
+@@ -0,0 +1,90 @@
++#pragma once
++
++#include <ggml-alloc.h>
++#include <ggml-backend.h>
++#include <ggml.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <stdexcept>
++#include <utility>
++#include <vector>
++
++namespace engine::models::fish_drama3 {
++
++// A device-resident copy of the leading bytes of a set of persistent runtime
++// tensors (KV-cache rows, recurrent states). Used by the per-voice prompt
++// prefix cache: save after prefilling a prefix, restore before prefilling a
++// request suffix. Copies stay on the tensors' backend (device-to-device on
++// CUDA); nothing is staged through host memory.
++class Drama3StateSnapshot {
++public:
++    struct Source {
++        ggml_tensor * tensor = nullptr;
++        size_t bytes = 0;  // leading bytes of `tensor` to keep
++    };
++
++    Drama3StateSnapshot(ggml_backend_t backend, const std::vector<Source> & sources, int64_t steps)
++        : backend_(backend), steps_(steps) {
++        if (backend_ == nullptr || sources.empty()) throw std::runtime_error("Drama 3 state snapshot requires a backend and sources");
++        const size_t overhead = ggml_tensor_overhead() * (sources.size() + 4);
++        view_ctx_.reset(ggml_init({overhead, nullptr, true}));
++        copy_ctx_.reset(ggml_init({overhead, nullptr, true}));
++        if (!view_ctx_ || !copy_ctx_) throw std::runtime_error("failed to initialize Drama 3 state snapshot contexts");
++        for (const auto & source : sources) {
++            if (source.tensor == nullptr || source.tensor->buffer == nullptr || source.tensor->data == nullptr) {
++                throw std::runtime_error("Drama 3 state snapshot source is not allocated");
++            }
++            const size_t element = ggml_type_size(source.tensor->type);
++            if (ggml_blck_size(source.tensor->type) != 1 || !ggml_is_contiguous(source.tensor) ||
++                source.bytes == 0 || source.bytes % element != 0 || source.bytes > ggml_nbytes(source.tensor)) {
++                throw std::runtime_error("Drama 3 state snapshot source range is invalid");
++            }
++            const int64_t elements = static_cast<int64_t>(source.bytes / element);
++            auto * view = ggml_view_1d(view_ctx_.get(), source.tensor, elements, 0);
++            view->data = nullptr;  // let ggml_backend_view_init bind buffer and address
++            if (ggml_backend_view_init(view) != GGML_STATUS_SUCCESS) throw std::runtime_error("failed to bind Drama 3 state snapshot view");
++            auto * copy = ggml_new_tensor_1d(copy_ctx_.get(), source.tensor->type, elements);
++            pairs_.push_back({view, copy});
++            bytes_ += source.bytes;
++        }
++        buffer_ = ggml_backend_alloc_ctx_tensors(copy_ctx_.get(), backend_);
++        if (buffer_ == nullptr) throw std::runtime_error("failed to allocate Drama 3 state snapshot buffer");
++        ggml_backend_synchronize(backend_);
++        for (const auto & pair : pairs_) ggml_backend_tensor_copy(pair.first, pair.second);
++    }
++
++    ~Drama3StateSnapshot() {
++        if (buffer_ != nullptr) ggml_backend_buffer_free(buffer_);
++    }
++
++    Drama3StateSnapshot(const Drama3StateSnapshot &) = delete;
++    Drama3StateSnapshot & operator=(const Drama3StateSnapshot &) = delete;
++
++    // Writes the saved bytes back into the original tensors. The caller must
++    // ensure those tensors are still the ones the snapshot was taken from.
++    void restore() const {
++        ggml_backend_synchronize(backend_);
++        for (const auto & pair : pairs_) ggml_backend_tensor_copy(pair.second, pair.first);
++    }
++
++    int64_t steps() const noexcept { return steps_; }
++    size_t bytes() const noexcept { return bytes_; }
++    ggml_backend_t backend() const noexcept { return backend_; }
++
++private:
++    struct ContextDeleter {
++        void operator()(ggml_context * context) const noexcept { if (context) ggml_free(context); }
++    };
++
++    ggml_backend_t backend_ = nullptr;
++    int64_t steps_ = 0;
++    size_t bytes_ = 0;
++    std::unique_ptr<ggml_context, ContextDeleter> view_ctx_;
++    std::unique_ptr<ggml_context, ContextDeleter> copy_ctx_;
++    ggml_backend_buffer_t buffer_ = nullptr;
++    std::vector<std::pair<ggml_tensor *, ggml_tensor *>> pairs_;
++};
++
++}  // namespace engine::models::fish_drama3
+diff --git a/include/engine/community_models/fish_drama3/tower.h b/include/engine/community_models/fish_drama3/tower.h
+index eacbbf5..454898a 100644
+--- a/include/engine/community_models/fish_drama3/tower.h
++++ b/include/engine/community_models/fish_drama3/tower.h
+@@ -13,6 +13,7 @@
+ namespace engine::models::fish_drama3 {
+ 
+ using Drama3Frame = std::array<int32_t, 11>;
++class Drama3StateSnapshot;
+ 
+ struct Drama3TowerConfig {
+     int64_t hidden_size = 2048;
+@@ -50,7 +51,13 @@ public:
+     void mix_backbone_embeddings(std::vector<float> & embeddings,
+                                  const std::vector<Drama3Frame> & frames) const;
+     std::vector<float> shared_input(const std::vector<Drama3Frame> & frames) const;
+-    void prefill(const std::vector<float> & hidden, const std::vector<Drama3Frame> & frames);
++    // Fills cache rows [offset, offset + frames.size() - 1); rows before
++    // `offset` must already be present (see restore_state).
++    void prefill(const std::vector<float> & hidden, const std::vector<Drama3Frame> & frames, int64_t offset = 0);
++    // Device copy of cache rows [0, rows) of every layer, for the prompt
++    // prefix cache; restore_state writes them back.
++    std::shared_ptr<Drama3StateSnapshot> save_state(int64_t rows);
++    void restore_state(const Drama3StateSnapshot & state);
+     Drama3TowerOutput run_layer(int64_t layer, const std::vector<float> & hidden,
+                               const std::vector<int32_t> & codes,
+                               const std::vector<float> & semantic_mask,
+diff --git a/model_specs/fish_drama3.json b/model_specs/fish_drama3.json
+index 005d0d9..b7997d4 100644
+--- a/model_specs/fish_drama3.json
++++ b/model_specs/fish_drama3.json
+@@ -157,6 +157,15 @@
+         "required": false,
+         "default": false
+       },
++      {
++        "name": "prefix_cache_entries",
++        "type": "int",
++        "description": "Voice-reference prompt prefixes whose backbone and audio-tower state is kept on the device, least recently used first out. A hit prefills only the request suffix. Each entry holds about 60 MiB of linear-attention state plus about 66 KiB per prefix row. Zero disables the cache and restores single-pass prefill.",
++        "required": false,
++        "min": 0,
++        "max": 64,
++        "default": 4
++      },
+       {
+         "name": "context_length",
+         "type": "int",
+diff --git a/src/community_models/fish_drama3/backbone.cpp b/src/community_models/fish_drama3/backbone.cpp
+index a545ce3..b3f65c9 100644
+--- a/src/community_models/fish_drama3/backbone.cpp
++++ b/src/community_models/fish_drama3/backbone.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/fish_drama3/backbone.h"
++#include "engine/community_models/fish_drama3/state_snapshot.h"
+ 
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/core/backend_weight_store.h"
+@@ -625,6 +626,70 @@ core::TensorValue full_attention_cached(
+         modules::LinearModule({config.heads * config.head_dim, config.hidden_size, false}).build(ctx, context, weights.o_proj), config);
+ }
+ 
++// Prefill continuation: `steps` rows that follow rows already in the cache.
++// K/V are written at runtime slots (the row positions) and the queries attend
++// over the whole cache under an explicit [cache_steps, steps] mask, so the
++// graph depends only on `steps`, not on the restored prefix length.
++core::TensorValue full_attention_prefill_continue(
++    core::ModuleBuildContext & ctx,
++    const core::TensorValue & input,
++    const core::TensorValue & positions,
++    const core::TensorValue & attention_mask,
++    const core::TensorValue & cache_key,
++    const core::TensorValue & cache_value,
++    const FullAttentionWeights & weights,
++    const Drama3BackboneDecoderConfig & config) {
++    auto q_gate = modules::LinearModule({config.hidden_size, config.heads * config.head_dim * 2, false}).build(ctx, input, weights.q_proj);
++    q_gate = round_activation(ctx, q_gate, config);
++    q_gate = reshape_heads(ctx, q_gate, config.heads, config.head_dim * 2);
++    auto q = modules::SliceModule({3, 0, config.head_dim}).build(ctx, q_gate);
++    auto gate = modules::SliceModule({3, config.head_dim, config.head_dim}).build(ctx, q_gate);
++    gate = core::reshape_tensor(
++        ctx,
++        core::ensure_backend_addressable_layout(ctx, gate),
++        core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], config.heads * config.head_dim}));
++    auto k = modules::LinearModule({config.hidden_size, config.kv_heads * config.head_dim, false}).build(ctx, input, weights.k_proj);
++    auto v = modules::LinearModule({config.hidden_size, config.kv_heads * config.head_dim, false}).build(ctx, input, weights.v_proj);
++    k = round_activation(ctx, k, config);
++    v = round_activation(ctx, v, config);
++    k = reshape_heads(ctx, k, config.kv_heads, config.head_dim);
++    v = reshape_heads(ctx, v, config.kv_heads, config.head_dim);
++    q = modules::GemmaRMSNormModule({config.head_dim, config.rms_norm_eps, true, false}).build(ctx, q, weights.q_norm);
++    k = modules::GemmaRMSNormModule({config.head_dim, config.rms_norm_eps, true, false}).build(ctx, k, weights.k_norm);
++    q = round_activation(ctx, q, config);
++    k = round_activation(ctx, k, config);
++    q = apply_partial_rope(ctx, q, positions, config);
++    k = apply_partial_rope(ctx, k, positions, config);
++    q = round_activation(ctx, q, config);
++    k = round_activation(ctx, k, config);
++    k = core::ensure_backend_addressable_layout(ctx, k);
++    v = core::ensure_backend_addressable_layout(ctx, v);
++    const modules::FastKVSetRowsModule set_rows({modules::FastKVSetRowsMode::BackendViewOptimized});
++    auto attention_key_cache = set_rows.build_block(ctx, cache_key, k, positions);
++    auto attention_value_cache = set_rows.build_block(ctx, cache_value, v, positions);
++    auto q_heads = modules::TransposeModule({{0, 2, 1, 3}, q.shape.rank}).build(ctx, q);
++    q_heads = core::wrap_tensor(ggml_cont(ctx.ggml, q_heads.tensor), q_heads.shape, q_heads.type);
++    auto k_heads = modules::TransposeModule({{0, 2, 1, 3}, attention_key_cache.shape.rank}).build(ctx, attention_key_cache);
++    auto v_heads = modules::TransposeModule({{0, 2, 1, 3}, attention_value_cache.shape.rank}).build(ctx, attention_value_cache);
++    auto context = modules::GroupedQueryAttentionModule({
++        config.head_dim,
++        modules::GroupedQueryAttentionLowering::FlashGroupedViewKV,
++        GGML_PREC_F32,
++        modules::AttentionCausality::NonCausal,
++    }).build(ctx, q_heads, k_heads, v_heads, attention_mask);
++    context = round_activation(ctx, context, config);
++    context = core::reshape_tensor(
++        ctx,
++        core::ensure_backend_addressable_layout(ctx, context),
++        core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], config.heads * config.head_dim}));
++    gate = modules::SigmoidModule{}.build(ctx, gate);
++    gate = round_activation(ctx, gate, config);
++    context = modules::MulModule{}.build(ctx, context, gate);
++    context = round_activation(ctx, context, config);
++    return round_activation(ctx,
++        modules::LinearModule({config.heads * config.head_dim, config.hidden_size, false}).build(ctx, context, weights.o_proj), config);
++}
++
+ core::TensorValue repeat_head_values(
+     core::ModuleBuildContext & ctx,
+     const core::TensorValue & values,
+@@ -668,7 +733,8 @@ LinearAttentionCachedOutput linear_attention_prefill(
+     const core::TensorValue & input,
+     const core::TensorValue & state,
+     const LinearAttentionWeights & weights,
+-    const Drama3BackboneDecoderConfig & config) {
++    const Drama3BackboneDecoderConfig & config,
++    const core::TensorValue * conv_tail = nullptr) {
+     const int64_t steps = input.shape.dims[1];
+     const int64_t key_dim = config.linear_key_head_dim * config.linear_num_key_heads;
+     const int64_t value_dim = config.linear_value_head_dim * config.linear_num_value_heads;
+@@ -677,21 +743,25 @@ LinearAttentionCachedOutput linear_attention_prefill(
+     qkv = round_activation(ctx, qkv, config);
+     qkv = modules::TransposeModule({{0, 2, 1}, 3}).build(ctx, qkv);
+     qkv = core::ensure_backend_addressable_layout(ctx, qkv);
+-    auto * padded_raw = ggml_pad_ext(
+-        ctx.ggml,
+-        qkv.tensor,
+-        static_cast<int>(config.linear_conv_kernel_dim - 1),
+-        0,
+-        0,
+-        0,
+-        0,
+-        0,
+-        0,
+-        0);
+-    auto padded = core::wrap_tensor(
+-        padded_raw,
+-        core::TensorShape::from_dims({1, conv_dim, steps + config.linear_conv_kernel_dim - 1}),
+-        GGML_TYPE_F32);
++    // A fresh prompt pads the causal convolution with zeros. A continued
++    // prefill (prompt prefix restored from the prefix cache) prepends the
++    // saved convolution tail instead, as single-step decode does.
++    auto padded = conv_tail != nullptr
++        ? modules::ConcatModule({2}).build(ctx, *conv_tail, qkv)
++        : core::wrap_tensor(
++              ggml_pad_ext(
++                  ctx.ggml,
++                  qkv.tensor,
++                  static_cast<int>(config.linear_conv_kernel_dim - 1),
++                  0,
++                  0,
++                  0,
++                  0,
++                  0,
++                  0,
++                  0),
++              core::TensorShape::from_dims({1, conv_dim, steps + config.linear_conv_kernel_dim - 1}),
++              GGML_TYPE_F32);
+     auto conv_weight = core::reshape_tensor(ctx, weights.conv_weight, core::TensorShape::from_dims({conv_dim, config.linear_conv_kernel_dim}));
+     auto conv = core::wrap_tensor(
+         ggml_ssm_conv(ctx.ggml, padded.tensor, conv_weight.tensor),
+@@ -1294,6 +1364,71 @@ public:
+         return out;
+     }
+ 
++    // Prefills `steps` rows after the rows already held in the cache (for
++    // example a prompt prefix restored by restore_state). Positions continue
++    // from valid_steps(); linear-attention layers start from the live
++    // recurrent state and convolution tail instead of zeros.
++    Drama3BackboneDecoderForwardResult prefill_continue(const std::vector<float> & embeddings, int64_t steps) {
++        if (valid_steps_ == 0) {
++            return prefill_embeddings(embeddings, steps);
++        }
++        if (steps <= 0 || static_cast<int64_t>(embeddings.size()) != steps * config_.hidden_size) {
++            throw std::runtime_error("Drama 3 backbone prefill embedding input size mismatch");
++        }
++        if (valid_steps_ + steps > cache_steps_) {
++            throw std::runtime_error("Drama 3 backbone prefill exceeds cache length");
++        }
++        auto & prefill = ensure_prefill(steps, true);
++        const int64_t offset = valid_steps_;
++        std::vector<int32_t> positions(static_cast<size_t>(steps));
++        for (int64_t row = 0; row < steps; ++row) positions[static_cast<size_t>(row)] = static_cast<int32_t>(offset + row);
++        ggml_backend_tensor_set(prefill.positions, positions.data(), 0, positions.size() * sizeof(int32_t));
++        const auto masked = ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity());
++        const auto visible = ggml_fp32_to_fp16(0.0F);
++        std::vector<ggml_fp16_t> mask(static_cast<size_t>(steps * cache_steps_), masked);
++        for (int64_t row = 0; row < steps; ++row) {
++            std::fill_n(mask.begin() + static_cast<std::ptrdiff_t>(row * cache_steps_), offset + row + 1, visible);
++        }
++        ggml_backend_tensor_set(prefill.attention_mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
++        core::write_tensor_f32(core::wrap_tensor(prefill.input, core::TensorShape::from_dims({1, steps, config_.hidden_size})), embeddings);
++        if (prefill.memory.hybrid.compute(execution_.backend(), prefill.memory.graph, "drama3_backbone.prefill_continue") != GGML_STATUS_SUCCESS) {
++            throw std::runtime_error("Drama 3 backbone prefill continuation graph compute failed");
++        }
++        Drama3BackboneDecoderForwardResult out;
++        out.steps = steps;
++        out.hidden = core::read_tensor_f32(prefill.output);
++        if (static_cast<int64_t>(out.hidden.size()) != steps * config_.hidden_size) {
++            throw std::runtime_error("Drama 3 backbone prefill readback size mismatch");
++        }
++        valid_steps_ += steps;
++        return out;
++    }
++
++    // Copies every piece of state a later prefill or decode step reads: the
++    // full-attention K/V rows [0, valid_steps) of each full-attention layer,
++    // and each linear-attention layer's recurrent state and convolution tail.
++    std::shared_ptr<Drama3StateSnapshot> save_state() {
++        if (valid_steps_ <= 0) throw std::runtime_error("Drama 3 backbone state snapshot requires a prefilled prompt");
++        std::vector<Drama3StateSnapshot::Source> sources;
++        for (size_t index = 0; index < full_key_caches_.size(); ++index) {
++            sources.push_back({full_key_caches_[index], static_cast<size_t>(valid_steps_) * full_key_caches_[index]->nb[2]});
++            sources.push_back({full_value_caches_[index], static_cast<size_t>(valid_steps_) * full_value_caches_[index]->nb[2]});
++        }
++        for (size_t index = 0; index < linear_recurrent_states_.size(); ++index) {
++            sources.push_back({linear_recurrent_states_[index], ggml_nbytes(linear_recurrent_states_[index])});
++            sources.push_back({linear_conv_tails_[index], ggml_nbytes(linear_conv_tails_[index])});
++        }
++        return std::make_shared<Drama3StateSnapshot>(execution_.backend(), sources, valid_steps_);
++    }
++
++    void restore_state(const Drama3StateSnapshot & state) {
++        if (state.backend() != execution_.backend() || state.steps() <= 0 || state.steps() > cache_steps_) {
++            throw std::runtime_error("Drama 3 backbone state snapshot does not match this decoder");
++        }
++        state.restore();
++        valid_steps_ = state.steps();
++    }
++
+     std::vector<float> run_embedding_step(const std::vector<float> & embedding) {
+         if (static_cast<int64_t>(embedding.size()) != config_.hidden_size) {
+             throw std::runtime_error("Drama 3 backbone cached decode embedding size mismatch");
+@@ -1326,6 +1461,7 @@ private:
+         GraphMemory memory;
+         ggml_backend_t backend = nullptr;
+         int64_t steps = 0;
++        bool continuation = false;
+         size_t bytes = 0;
+         ggml_tensor * input = nullptr;
+         ggml_tensor * positions = nullptr;
+@@ -1334,9 +1470,14 @@ private:
+         ~PrefillGraph() { memory.reset(backend); }
+     };
+ 
+-    PrefillGraph & ensure_prefill(int64_t steps) {
++    // Fresh prefill graphs (continuation=false) start at position 0 with zero
++    // linear state and causal attention within the chunk; their positions and
++    // mask are constant per shape. Continuation graphs read and update the
++    // live caches, take positions and a [cache_steps, steps] mask per call,
++    // and are keyed by row count only, so one graph serves any prefix length.
++    PrefillGraph & ensure_prefill(int64_t steps, bool continuation = false) {
+         const auto found = std::find_if(prefill_graphs_.begin(), prefill_graphs_.end(),
+-            [steps](const auto & graph) { return graph->steps == steps; });
++            [steps, continuation](const auto & graph) { return graph->steps == steps && graph->continuation == continuation; });
+         if (found != prefill_graphs_.end()) {
+             prefill_graphs_.splice(prefill_graphs_.begin(), prefill_graphs_, found);
+             return *prefill_graphs_.front();
+@@ -1352,6 +1493,8 @@ private:
+         auto & prefill = *built;
+         prefill.backend = execution_.backend();
+         prefill.steps = steps;
++        prefill.continuation = continuation;
++        const int64_t key_steps = continuation ? cache_steps_ : steps;
+         ggml_init_params params{128ull * 1024ull * 1024ull, nullptr, true};
+         prefill.memory.ctx.reset(ggml_init(params));
+         ggml_init_params input_params{32ull * 1024ull * 1024ull, nullptr, true};
+@@ -1364,11 +1507,11 @@ private:
+         auto positions = core::make_tensor(input_ctx, GGML_TYPE_I32, core::TensorShape::from_dims({steps}));
+         prefill.positions = positions.tensor;
+         ggml_set_input(prefill.positions);
+-        prefill.attention_mask = ggml_new_tensor_4d(prefill.memory.input_ctx.get(), GGML_TYPE_F16, steps, steps, 1, 1);
++        prefill.attention_mask = ggml_new_tensor_4d(prefill.memory.input_ctx.get(), GGML_TYPE_F16, key_steps, steps, 1, 1);
+         ggml_set_input(prefill.attention_mask);
+         auto attention_mask = core::wrap_tensor(
+             prefill.attention_mask,
+-            core::TensorShape::from_dims({1, 1, steps, steps}),
++            core::TensorShape::from_dims({1, 1, steps, key_steps}),
+             GGML_TYPE_F16);
+ 
+         prefill.memory.graph = ggml_new_graph_custom(prefill.memory.ctx.get(), 65536, false);
+@@ -1385,29 +1528,31 @@ private:
+                 if (full_index >= full_count) {
+                     throw std::runtime_error("Drama 3 backbone full-attention cache count mismatch");
+                 }
+-                h = full_attention_prefill_cached(
+-                    ctx,
+-                    prefill.memory.graph,
+-                    h,
+-                    positions,
+-                    attention_mask,
+-                    core::wrap_tensor(
+-                        full_key_caches_[static_cast<size_t>(full_index)],
+-                        core::TensorShape::from_dims({1, cache_steps_, config_.kv_heads, config_.head_dim}),
+-                        GGML_TYPE_F32),
+-                    core::wrap_tensor(
+-                        full_value_caches_[static_cast<size_t>(full_index)],
+-                        core::TensorShape::from_dims({1, cache_steps_, config_.kv_heads, config_.head_dim}),
+-                        GGML_TYPE_F32),
+-                    *layer.full,
+-                    config_);
++                const auto key_cache = core::wrap_tensor(
++                    full_key_caches_[static_cast<size_t>(full_index)],
++                    core::TensorShape::from_dims({1, cache_steps_, config_.kv_heads, config_.head_dim}),
++                    GGML_TYPE_F32);
++                const auto value_cache = core::wrap_tensor(
++                    full_value_caches_[static_cast<size_t>(full_index)],
++                    core::TensorShape::from_dims({1, cache_steps_, config_.kv_heads, config_.head_dim}),
++                    GGML_TYPE_F32);
++                h = continuation
++                    ? full_attention_prefill_continue(ctx, h, positions, attention_mask, key_cache, value_cache, *layer.full, config_)
++                    : full_attention_prefill_cached(ctx, prefill.memory.graph, h, positions, attention_mask,
++                                                    key_cache, value_cache, *layer.full, config_);
+                 ++full_index;
+             } else {
+                 if (linear_index >= linear_count) {
+                     throw std::runtime_error("Drama 3 backbone linear-attention state count mismatch");
+                 }
+-                auto state = core::wrap_tensor(prefill_zero_state_, core::TensorShape::from_dims({1, 1, state_values}));
+-                auto out = linear_attention_prefill(ctx, h, state, *layer.linear, config_);
++                const auto conv_tail = core::wrap_tensor(linear_conv_tails_[static_cast<size_t>(linear_index)],
++                    core::TensorShape::from_dims({1, (config_.linear_key_head_dim * config_.linear_num_key_heads) * 2 +
++                        config_.linear_value_head_dim * config_.linear_num_value_heads, config_.linear_conv_kernel_dim - 1}),
++                    GGML_TYPE_F32);
++                auto state = core::wrap_tensor(
++                    continuation ? linear_recurrent_states_[static_cast<size_t>(linear_index)] : prefill_zero_state_,
++                    core::TensorShape::from_dims({1, 1, state_values}));
++                auto out = linear_attention_prefill(ctx, h, state, *layer.linear, config_, continuation ? &conv_tail : nullptr);
+                 ggml_build_forward_expand(
+                     prefill.memory.graph,
+                     ggml_cpy(ctx.ggml, out.next_conv_tail.tensor, linear_conv_tails_[static_cast<size_t>(linear_index)]));
+@@ -1440,10 +1585,12 @@ private:
+             prefill.memory.reset(execution_.backend());
+             throw std::runtime_error("failed to allocate Drama 3 backbone prefill graph");
+         }
+-        const auto pos = position_ids(steps);
+-        ggml_backend_tensor_set(prefill.positions, pos.data(), 0, pos.size() * sizeof(int32_t));
+-        const auto mask = modules::causal_prefill_mask_values(1, steps);
+-        ggml_backend_tensor_set(prefill.attention_mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
++        if (!continuation) {
++            const auto pos = position_ids(steps);
++            ggml_backend_tensor_set(prefill.positions, pos.data(), 0, pos.size() * sizeof(int32_t));
++            const auto mask = modules::causal_prefill_mask_values(1, steps);
++            ggml_backend_tensor_set(prefill.attention_mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
++        }
+         prefill.bytes = prefill.memory.hybrid.buffer_bytes() + ggml_backend_buffer_get_size(prefill.memory.input_buffer);
+         // Retain at most eight shapes within the budget. One active graph is
+         // required even when its working set exceeds the cache budget.
+@@ -1455,8 +1602,8 @@ private:
+         prefill_cached_bytes_ += prefill.bytes;
+         prefill_graphs_.push_front(std::move(built));
+         if (config_.profile_prefill_cache) {
+-            std::fprintf(stderr, "[drama3.prefill_cache] rows=%lld graph_mib=%.1f retained_mib=%.1f shapes=%zu nodes=%d\n",
+-                static_cast<long long>(steps), prefill.bytes / 1048576.0,
++            std::fprintf(stderr, "[drama3.prefill_cache] rows=%lld continuation=%d graph_mib=%.1f retained_mib=%.1f shapes=%zu nodes=%d\n",
++                static_cast<long long>(steps), continuation ? 1 : 0, prefill.bytes / 1048576.0,
+                 prefill_cached_bytes_ / 1048576.0, prefill_graphs_.size(), ggml_graph_n_nodes(prefill.memory.graph));
+         }
+         return *prefill_graphs_.front();
+@@ -1557,6 +1704,20 @@ public:
+         return graph_.get().prefill_embeddings(embeddings, steps);
+     }
+ 
++    Drama3BackboneDecoderForwardResult prefill_continue(
++        const std::vector<float> & embeddings,
++        int64_t steps) override {
++        return graph_.get().prefill_continue(embeddings, steps);
++    }
++
++    std::shared_ptr<Drama3StateSnapshot> save_state() override {
++        return graph_.get().save_state();
++    }
++
++    void restore_state(const Drama3StateSnapshot & state) override {
++        graph_.get().restore_state(state);
++    }
++
+     std::vector<float> run_embedding_step(const std::vector<float> & embedding) override {
+         return graph_.get().run_embedding_step(embedding);
+     }
+diff --git a/src/community_models/fish_drama3/generator.cpp b/src/community_models/fish_drama3/generator.cpp
+index 4a0c63f..17ce6b9 100644
+--- a/src/community_models/fish_drama3/generator.cpp
++++ b/src/community_models/fish_drama3/generator.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/fish_drama3/generator.h"
++#include "engine/community_models/fish_drama3/state_snapshot.h"
+ 
+ #include "engine/framework/debug/profiler.h"
+ #include "engine/framework/runtime/errors.h"
+@@ -45,6 +46,20 @@ std::vector<float> last_hidden(const std::vector<float> & values, int64_t width)
+     return {values.end() - width, values.end()};
+ }
+ 
++uint64_t hash_frames(const std::vector<Drama3Frame> & frames) {
++    uint64_t hash = 1469598103934665603ULL;  // FNV-1a
++    for (const auto & frame : frames) {
++        for (const auto value : frame) {
++            auto bits = static_cast<uint32_t>(value);
++            for (int byte = 0; byte < 4; ++byte, bits >>= 8) {
++                hash ^= bits & 0xffU;
++                hash *= 1099511628211ULL;
++            }
++        }
++    }
++    return hash ^ static_cast<uint64_t>(frames.size());
++}
++
+ }  // namespace
+ 
+ Drama3Generator::Drama3Generator(std::shared_ptr<const Drama3Assets> assets,
+@@ -55,6 +70,9 @@ Drama3Generator::Drama3Generator(std::shared_ptr<const Drama3Assets> assets,
+     if (const auto value = runtime::find_option(options.options, {"fish_drama3.profile_first_audio"})) {
+         profile_first_audio_ = runtime::parse_bool_option(*value, "fish_drama3.profile_first_audio");
+     }
++    const auto prefix_cache_entries = runtime::parse_i64_option(options.options, {"fish_drama3.prefix_cache_entries"}).value_or(4);
++    if (prefix_cache_entries < 0 || prefix_cache_entries > 64) throw std::runtime_error("Drama 3 prefix_cache_entries must be between 0 and 64");
++    prefix_cache_capacity_ = static_cast<size_t>(prefix_cache_entries);
+     auto backbone_config = assets_->backbone;
+     backbone_config.decode_cache_steps = cache_steps_;
+     backbone_config.cpu_expert_layers = runtime::parse_i64_option(options.options, {"fish_drama3.cpu_expert_layers"}).value_or(4);
+@@ -140,7 +158,10 @@ Drama3Generation Drama3Generator::generate(const std::string & text, const std::
+         first_audio_phases.emplace_back(name, std::chrono::duration<double, std::milli>(now - profile_marked).count());
+         profile_marked = now;
+     };
+-    const auto prompt = build_drama3_prompt(*assets_, tokenizer_, text, references, history);
++    size_t prefix_rows = 0;
++    const auto prompt = build_drama3_prompt(*assets_, tokenizer_, text, references, history, &prefix_rows);
++    // Capacity covers the whole prompt (cached prefix rows included) plus the
++    // generation budget; the prefix cache does not change row accounting.
+     if (sampling.max_frames > cache_steps_ ||
+         prompt.size() > static_cast<size_t>(cache_steps_ - sampling.max_frames)) {
+         throw runtime::CapacityError("Drama 3 prompt plus max_tokens exceeds fish_drama3.context_length; increase it or shorten history");
+@@ -149,15 +170,79 @@ Drama3Generation Drama3Generator::generate(const std::string & text, const std::
+     decoder->reset();
+     tower_->reset();
+     mark_phase("setup_ms");
+-    std::vector<int32_t> ids;
+-    for (const auto & frame : prompt) ids.push_back(frame[0]);
+-    auto embeddings = backbone_->token_embedding(ids);
+-    tower_->mix_backbone_embeddings(embeddings, prompt);
+-    mark_phase("embedding_ms");
+-    const auto prefill = decoder->prefill_embeddings(embeddings, static_cast<int64_t>(prompt.size()));
+-    mark_phase("backbone_prefill_ms");
+-    tower_->prefill(prefill.hidden, prompt);
+-    mark_phase("tower_prefill_ms");
++    const auto embed = [&](std::vector<Drama3Frame>::const_iterator begin, std::vector<Drama3Frame>::const_iterator end) {
++        const std::vector<Drama3Frame> frames(begin, end);
++        std::vector<int32_t> ids;
++        for (const auto & frame : frames) ids.push_back(frame[0]);
++        auto values = backbone_->token_embedding(ids);
++        tower_->mix_backbone_embeddings(values, frames);
++        return values;
++    };
++    // Only reference prompts are worth caching: their prefix is hundreds of
++    // rows, while the built-in voice prefix is a dozen text tokens.
++    const bool use_prefix_cache = prefix_cache_capacity_ > 0 && !references.empty() &&
++        prefix_rows > 0 && prefix_rows < prompt.size();
++    const char * prefix_status = "off";
++    Drama3BackboneDecoderForwardResult prefill;
++    if (!use_prefix_cache) {
++        auto embeddings = embed(prompt.begin(), prompt.end());
++        mark_phase("embedding_ms");
++        prefill = decoder->prefill_embeddings(embeddings, static_cast<int64_t>(prompt.size()));
++        mark_phase("backbone_prefill_ms");
++        tower_->prefill(prefill.hidden, prompt);
++        mark_phase("tower_prefill_ms");
++    } else {
++        const auto prefix_end = prompt.begin() + static_cast<std::ptrdiff_t>(prefix_rows);
++        const std::vector<Drama3Frame> prefix(prompt.begin(), prefix_end);
++        const uint64_t hash = hash_frames(prefix);
++        auto entry = std::find_if(prefix_cache_.begin(), prefix_cache_.end(),
++            [&](const PrefixCacheEntry & candidate) { return candidate.hash == hash && candidate.prefix == prefix; });
++        if (entry != prefix_cache_.end()) {
++            prefix_cache_.splice(prefix_cache_.begin(), prefix_cache_, entry);
++            decoder->restore_state(*prefix_cache_.front().backbone);
++            tower_->restore_state(*prefix_cache_.front().tower);
++            prefix_status = "hit";
++            mark_phase("prefix_restore_ms");
++            if (profile_first_audio_) std::cerr << "[drama3.prefix_cache] hit rows=" << prefix_rows << '\n';
++        } else {
++            // Cold path: prefill the prefix on its own, snapshot it, then
++            // continue with the suffix exactly as a cache hit does, so hits
++            // and misses produce identical state for the suffix rows.
++            const auto prefix_embeddings = embed(prompt.begin(), prefix_end);
++            const auto prefix_prefill = decoder->prefill_embeddings(prefix_embeddings, static_cast<int64_t>(prefix_rows));
++            // Row prefix_rows - 1 is labelled by the first suffix row, which
++            // is always the text token opening the user turn.
++            tower_->prefill(prefix_prefill.hidden, std::vector<Drama3Frame>(prompt.begin(), prefix_end + 1), 0);
++            prefix_status = "miss";
++            while (prefix_cache_.size() >= prefix_cache_capacity_) prefix_cache_.pop_back();
++            try {
++                PrefixCacheEntry stored;
++                stored.hash = hash;
++                stored.prefix = prefix;
++                stored.backbone = decoder->save_state();
++                stored.tower = tower_->save_state(static_cast<int64_t>(prefix_rows));
++                if (profile_first_audio_) {
++                    std::cerr << "[drama3.prefix_cache] store rows=" << prefix_rows << " mib="
++                              << (stored.backbone->bytes() + stored.tower->bytes()) / 1048576.0
++                              << " entries=" << prefix_cache_.size() + 1 << '\n';
++                }
++                prefix_cache_.push_front(std::move(stored));
++            } catch (const std::exception & error) {
++                // Saving only reads the live state; generation can continue.
++                std::cerr << "[fish_drama3] prefix cache store failed: " << error.what() << '\n';
++            }
++            mark_phase("prefix_prefill_ms");
++        }
++        auto embeddings = embed(prefix_end, prompt.end());
++        mark_phase("embedding_ms");
++        prefill = decoder->prefill_continue(embeddings, static_cast<int64_t>(prompt.size() - prefix_rows));
++        mark_phase("backbone_prefill_ms");
++        tower_->prefill(prefill.hidden, std::vector<Drama3Frame>(prefix_end, prompt.end()), static_cast<int64_t>(prefix_rows));
++        mark_phase("tower_prefill_ms");
++        if (decoder->valid_steps() != static_cast<int64_t>(prompt.size())) {
++            throw std::runtime_error("Drama 3 prefix cache produced an inconsistent prompt length");
++        }
++    }
+     auto hidden = last_hidden(prefill.hidden, assets_->backbone.hidden_size);
+     Drama3Frame current = prompt.back();
+     std::mt19937 random(sampling.seed);
+@@ -207,7 +292,8 @@ Drama3Generation Drama3Generator::generate(const std::string & text, const std::
+             runtime::append_audio_buffer(result.audio, chunk);
+             if (on_audio) on_audio(chunk);
+             if (step == 0 && profile_first_audio_) {
+-                std::cerr << "[drama3.first_audio] prompt_rows=" << prompt.size();
++                std::cerr << "[drama3.first_audio] prompt_rows=" << prompt.size() << " prefix_rows=" << prefix_rows
++                          << " prefix_cache=" << prefix_status;
+                 for (const auto & phase : first_audio_phases) std::cerr << " " << phase.first << "=" << phase.second;
+                 std::cerr << " total_ms=" << std::chrono::duration<double, std::milli>(ProfileClock::now() - profile_start).count() << '\n';
+             }
+diff --git a/src/community_models/fish_drama3/prompt.cpp b/src/community_models/fish_drama3/prompt.cpp
+index 124020e..d160e0f 100644
+--- a/src/community_models/fish_drama3/prompt.cpp
++++ b/src/community_models/fish_drama3/prompt.cpp
+@@ -75,7 +75,7 @@ void validate_drama3_codes(const codecs::FishDacCodes & codes, int64_t size) {
+ 
+ std::vector<Drama3Frame> build_drama3_prompt(const Drama3Assets & assets,
+     const Drama3TextTokenizer & tokenizer, const std::string & text,
+-    const std::vector<Drama3Take> & references, const std::vector<Drama3Take> & history) {
++    const std::vector<Drama3Take> & references, const std::vector<Drama3Take> & history, size_t * prefix_rows) {
+     std::vector<Drama3Frame> frames;
+     const auto append_text = [&](const std::string & segment) {
+         for (const auto token : tokenizer.encode(segment)) {
+@@ -101,6 +101,9 @@ std::vector<Drama3Frame> build_drama3_prompt(const Drama3Assets & assets,
+         append_codes(references[index].codes);
+     }
+     append_text("<|im_end|>\n");
++    // Every segment is tokenized on its own, so the system turn (text plus
++    // reference rows) is a stable per-voice prefix of the full prompt.
++    if (prefix_rows != nullptr) *prefix_rows = frames.size();
+     const auto user_turn = [&](const std::string & value) {
+         validate_drama3_text(value, "input");
+         append_text("<|im_start|>user\n");
+diff --git a/src/community_models/fish_drama3/tower.cpp b/src/community_models/fish_drama3/tower.cpp
+index 952c597..c6ffed1 100644
+--- a/src/community_models/fish_drama3/tower.cpp
++++ b/src/community_models/fish_drama3/tower.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/fish_drama3/tower.h"
++#include "engine/community_models/fish_drama3/state_snapshot.h"
+ 
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/core/backend_weight_store.h"
+@@ -195,15 +196,22 @@ public:
+         return result;
+     }
+ 
+-    void prefill(const std::vector<float> & input, const std::vector<Drama3Frame> & frames) {
+-        if (frames.empty() || input.size() != frames.size() * static_cast<size_t>(config_.hidden_size)) {
++    // Fills tower cache rows [offset, offset + frames.size() - 1). `frames`
++    // holds the prompt rows from `offset` on, plus the row that follows them
++    // (its codes are the labels for the last filled row). `input` holds the
++    // backbone hidden states of the filled rows; a trailing row is ignored.
++    // Rows before `offset` must already be in the cache (restore_state).
++    void prefill(const std::vector<float> & input, const std::vector<Drama3Frame> & frames, int64_t offset) {
++        const size_t width = static_cast<size_t>(config_.hidden_size);
++        if (frames.empty() || offset < 0 ||
++            (input.size() != frames.size() * width && input.size() != (frames.size() - 1) * width)) {
+             throw std::runtime_error("Drama 3 tower prompt hidden size mismatch");
+         }
+         // The last prompt row predicts the first generated frame. Its tower
+         // cache entry is filled by generation, after the semantic draw.
+         const int64_t steps = static_cast<int64_t>(frames.size()) - 1;
+         if (steps == 0) return;
+-        if (steps > capacity_) throw std::runtime_error("Drama 3 tower prefill exceeds cache length");
++        if (offset + steps > capacity_) throw std::runtime_error("Drama 3 tower prefill exceeds cache length");
+         std::vector<float> hidden(input.begin(), input.begin() + steps * config_.hidden_size);
+         std::vector<Drama3Frame> current(frames.begin(), frames.end() - 1);
+         std::vector<float> masks(static_cast<size_t>(steps));
+@@ -216,12 +224,12 @@ public:
+         ggml_backend_tensor_set(graph->label_mask, masks.data(), 0, masks.size() * sizeof(float));
+         ggml_backend_tensor_set(graph->extra, extra.data(), 0, extra.size() * sizeof(float));
+         std::vector<int32_t> positions(static_cast<size_t>(steps));
+-        for (int64_t row = 0; row < steps; ++row) positions[row] = static_cast<int32_t>(row);
++        for (int64_t row = 0; row < steps; ++row) positions[row] = static_cast<int32_t>(offset + row);
+         ggml_backend_tensor_set(graph->positions, positions.data(), 0, positions.size() * sizeof(int32_t));
+         std::vector<ggml_fp16_t> attention_mask(static_cast<size_t>(capacity_ * steps));
+         const auto negative_infinity = ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity());
+         for (int64_t row = 0; row < steps; ++row) for (int64_t key = 0; key < capacity_; ++key) {
+-            attention_mask[row * capacity_ + key] = key <= row ? ggml_fp32_to_fp16(0) : negative_infinity;
++            attention_mask[row * capacity_ + key] = key <= offset + row ? ggml_fp32_to_fp16(0) : negative_infinity;
+         }
+         ggml_backend_tensor_set(graph->attention_mask, attention_mask.data(), 0, attention_mask.size() * sizeof(ggml_fp16_t));
+         for (size_t book = 0; book < graph->book_codes.size(); ++book) {
+@@ -239,6 +247,25 @@ public:
+         ggml_backend_synchronize(execution_.backend());
+     }
+ 
++    // The tower keeps no recurrent state: rows [0, rows) of every layer's
++    // K/V cache are everything later rows read from a prompt prefix.
++    std::shared_ptr<Drama3StateSnapshot> save_state(int64_t rows) {
++        if (rows <= 0 || rows > capacity_) throw std::runtime_error("Drama 3 tower state snapshot range is invalid");
++        std::vector<Drama3StateSnapshot::Source> sources;
++        for (const auto & layer : layers_) {
++            sources.push_back({layer.key_cache, static_cast<size_t>(rows) * layer.key_cache->nb[1]});
++            sources.push_back({layer.value_cache, static_cast<size_t>(rows) * layer.value_cache->nb[1]});
++        }
++        return std::make_shared<Drama3StateSnapshot>(execution_.backend(), sources, rows);
++    }
++
++    void restore_state(const Drama3StateSnapshot & state) {
++        if (state.backend() != execution_.backend() || state.steps() <= 0 || state.steps() > capacity_) {
++            throw std::runtime_error("Drama 3 tower state snapshot does not match this tower");
++        }
++        state.restore();
++    }
++
+     Drama3TowerOutput run_layer(int64_t layer, const std::vector<float> & hidden,
+                                const std::vector<int32_t> & codes, const std::vector<float> & masks,
+                                const std::vector<float> & extra, int64_t position, int64_t steps) {
+@@ -473,7 +500,11 @@ void Drama3Tower::mix_backbone_embeddings(std::vector<float> & embeddings, const
+     impl_->mix_backbone_embeddings(embeddings, frames);
+ }
+ std::vector<float> Drama3Tower::shared_input(const std::vector<Drama3Frame> & frames) const { return impl_->shared_input(frames); }
+-void Drama3Tower::prefill(const std::vector<float> & hidden, const std::vector<Drama3Frame> & frames) { impl_->prefill(hidden, frames); }
++void Drama3Tower::prefill(const std::vector<float> & hidden, const std::vector<Drama3Frame> & frames, int64_t offset) {
++    impl_->prefill(hidden, frames, offset);
++}
++std::shared_ptr<Drama3StateSnapshot> Drama3Tower::save_state(int64_t rows) { return impl_->save_state(rows); }
++void Drama3Tower::restore_state(const Drama3StateSnapshot & state) { impl_->restore_state(state); }
+ Drama3TowerOutput Drama3Tower::run_layer(int64_t layer, const std::vector<float> & hidden,
+                                         const std::vector<int32_t> & codes, const std::vector<float> & semantic_mask,
+                                         const std::vector<float> & extra_input, int64_t position, int64_t steps) {

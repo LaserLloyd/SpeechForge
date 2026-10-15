@@ -463,9 +463,9 @@ the SpeechForge adapter (codes per request, 24 kHz out), **port built with CUDA 
 | --- | --- | --- |
 | improvised voice (no reference) | ~60 ms (server) | 0.35 |
 | cloned, 6 s clip (codes cached) | 123-127 ms | 0.34-0.35 |
-| cloned, 12.6 s clip (codes cached) | 140-152 ms | 0.36 |
-| voice kept from a 3.9 s take | 100-132 ms | 0.36-0.40 |
-| first unit of a new clip voice (one-time encode) | +100-200 ms | |
+| cloned, 12.6 s clip (codes cached) | 140-152 ms; **95-107 ms with the prefix cache** | 0.35-0.36 |
+| voice kept from a 3.9 s take | 100-132 ms; **80 ms with the prefix cache** | 0.34-0.40 |
+| first unit of a new clip voice (one-time encode + prefix save) | +100-250 ms | |
 | cold load | 18-22 s | |
 
 The same source **built with CUDA 13.4** pre-fills at ~2.4 ms per prompt row instead of
@@ -555,12 +555,21 @@ in an improvised voice. The codes depend on the codec checkpoint, which the Q4 p
 Speaker tags: untagged text and references are speaker 0; the port accepts
 `<|speaker:0|>`..`<|speaker:15|>` but SpeechForge sends one voice per context.
 
-What is left on the 13.1 build for a 371-row pre-fill: 89 ms wall, 35 ms of matrix
-multiplies, ~15 ms summing the eight experts' outputs (`backbone.cpp:425-426`, a permute and
-`sum_rows` that a view-and-add would halve), 6 ms of linear attention and ~20 ms of launch
-gaps. A per-voice prefix cache (save the backbone state after the reference rows, pre-fill
-only the ~35-row suffix) would take ~60-90 ms more off a long reference; it is a C++ change
-to the port and was not written. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
+**The prefix cache (S36).** SpeechForge ships a patch to the port
+(`engines/patches/audiocpp-drama3-prefix-cache.patch`, 10 files, applied by `engine-setup`
+unless `--no-prefix-cache`): the prompt is split into a per-voice prefix (system text and the
+reference blocks) and a per-request suffix; after a voice's first request the backbone's
+full-attention K/V rows, the 30 linear-attention states with their convolution tails and the
+audio tower's K/V rows are kept on the device (~85 MiB for a 12.6 s reference, ~63 MiB fixed
+plus 66 KiB per row), keyed on the exact prefix tokens and codes, most recently used first
+out (`prefix_cache_entries`, 4). A hit restores the state in ~2 ms and pre-fills only the
+~20-45 suffix rows: a repeated 12.6 s reference reaches first audio in 79 ms at the server
+(95-107 ms through the adapter), a kept take in 80 ms; the first request of a voice costs
+~50 ms more than before (two pre-fill passes and the state copy). Cold and cached requests
+produce byte-identical audio for the same seed (checked on the 13.1 build and on the CPU
+backend). `tts.drama3.prefix_cache: false` sends no option, for a stock server, which
+refuses it. What is left on a hit: ~40-50 ms of suffix pre-fill, ~15 ms summing the eight
+experts' outputs (`backbone.cpp:425-426`), and launch gaps. `tts.drama3.*` keys: `port`, `server_exe`, `model_path`,
 `threads`, `cpu_expert_layers` (VRAM offload; 4 for a 24 GB card), `context_length`,
 `max_tokens`, `max_ref_s`, `output_rate`, `startup_timeout_s`, `http_timeout_s`.
 

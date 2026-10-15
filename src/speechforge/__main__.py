@@ -151,6 +151,7 @@ def cmd_engine_setup(args: argparse.Namespace) -> int:
                 install_model=not args.no_model,
                 cuda_toolkit=Path(args.cuda_toolkit) if args.cuda_toolkit else None,
                 cuda_arch=args.cuda_arch,
+                prefix_cache=not args.no_prefix_cache,
             )
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"engine-setup drama3 failed: {exc}", file=sys.stderr)
@@ -554,6 +555,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CUDA toolkit root to build with (default: 13.1 if installed; S35)")
     p.add_argument("--cuda-arch", default="auto",
                    help="the build script's -CudaArchitectures (e.g. 120a-real)")
+    p.add_argument("--no-prefix-cache", action="store_true",
+                   help="build the stock port without the per-voice prefix-cache patch (S36)")
     p = add("verify-models", cmd_verify, "verify model files against models.lock")
     p.add_argument("--full", action="store_true", help="re-hash every file")
     p = add("doctor", cmd_doctor, "check this machine")

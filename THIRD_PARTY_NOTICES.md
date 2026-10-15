@@ -118,7 +118,10 @@ pinned revisions.
   **Built with Fish Audio** (the engine's `describe()` carries it; display it on any
   product that uses the engine).
 - Runtime: https://github.com/JarodMica/audio.cpp, branch `drama-3-native`, Apache-2.0,
-  Copyright 2026 ShugoAI LLC. Built from source outside the repository by `engine-setup`.
+  Copyright 2026 ShugoAI LLC. Built from source outside the repository by `engine-setup`,
+  which first applies `src/speechforge/engines/patches/audiocpp-drama3-prefix-cache.patch`
+  (SpeechForge's own change to that Apache-2.0 code, under this repository's MIT licence;
+  `--no-prefix-cache` builds the stock port).
 - Nothing is fetched or installed by default; the engine loads only with the owner's
   `voices.allow_reference_clip: true` (decision D3) and `tts.engine: drama3-tts`.
 

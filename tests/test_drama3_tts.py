@@ -110,10 +110,16 @@ def test_server_config_is_the_servers_own_shape(tmp_path):
     assert model["session_options"] == {
         "fish_drama3.cpu_expert_layers": 4,
         "fish_drama3.context_length": 4096,
+        "fish_drama3.prefix_cache_entries": 4,
     }
     assert model["default_request_options"] == {"max_tokens": 500}
     assert doc["threads"] == 6
     json.dumps(doc)  # serialisable
+    # A stock server refuses the option, so `prefix_cache: false` keeps it out (S36).
+    stock = server_config(_config(tmp_path, prefix_cache=False), Path("C:/m/drama.gguf"))
+    assert "fish_drama3.prefix_cache_entries" not in stock["models"][0]["session_options"]
+    off = server_config(_config(tmp_path, prefix_cache_entries=0), Path("C:/m/drama.gguf"))
+    assert off["models"][0]["session_options"]["fish_drama3.prefix_cache_entries"] == 0
 
 
 
@@ -473,6 +479,12 @@ def test_setup_drives_the_ports_own_tools_in_order(tmp_path, monkeypatch):
         envs.append(kw.get("env") or {})
         if argv[:2] == ["git", "clone"]:
             Path(argv[-1], ".git").mkdir(parents=True)
+        if argv[:2] == ["git", "apply"]:
+            # `--check --reverse` (already applied?) says no; `--check` says yes.
+            done = Done()
+            done.returncode = 1 if "--reverse" in argv else 0
+            done.stderr = ""
+            return done
         return Done()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -495,5 +507,39 @@ def test_setup_drives_the_ports_own_tools_in_order(tmp_path, monkeypatch):
             assert argv[argv.index("-CudaArchitectures") + 1] == "120a-real"
     assert out["cuda_toolkit"] == str(toolkit)
     assert out["commit"] == drama3_tts.AUDIOCPP_COMMIT
+    # S36: the shipped prefix-cache patch is applied before the build.
+    applies = [r for r in runs if r[:2] == ["git", "apply"] and "--check" not in r]
+    assert applies and applies[0][2].endswith("audiocpp-drama3-prefix-cache.patch")
+    assert out["prefix_cache_patch"] is True
+    assert runs.index(applies[0]) < runs.index(build[0][0])
+
+
+def test_shipped_patch_is_present_and_targets_the_port():
+    text = drama3_tts.PREFIX_CACHE_PATCH.read_text(encoding="utf-8")
+    assert text.count("diff --git") == 10
+    assert "fish_drama3/backbone.cpp" in text and "prefix_cache_entries" in text
+
+
+def test_setup_can_build_the_stock_port(tmp_path, monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(drama3_tts, "_vs_build_tools", lambda: True)
+    runs: list[list[str]] = []
+
+    class Done:
+        stdout = drama3_tts.AUDIOCPP_COMMIT + "\n"
+
+    def fake_run(argv, **kw):
+        runs.append([str(a) for a in argv])
+        if argv[:2] == ["git", "clone"]:
+            Path(argv[-1], ".git").mkdir(parents=True)
+        return Done()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = drama3_tts.setup(_config(tmp_path), prefix_cache=False, build=False,
+                           install_model=False, log=lambda s: None)
+    assert out["prefix_cache_patch"] is False
+    assert not any(r[:2] == ["git", "apply"] for r in runs)
     assert out["model_exists"] is False and out["attribution"] == "Built with Fish Audio"
     assert Path(out["model_path"]).name == MODEL_FILE

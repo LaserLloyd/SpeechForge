@@ -553,3 +553,22 @@ adapter on the 13.1 build (codes per request, 24 kHz out, `seed` 11): 6 s clip 1
 first audio (first unit 244 with the one-time encode), 12.6 s clip 140-152 ms, a voice kept
 from a 3.9 s take 100-132 ms, RTF 0.34-0.40; the kept voice produced the same audio length
 on both runs. Takes in `quality-2026-10-15-drama3/s34-*.wav`.
+
+### The prefix cache (2026-10-15, patch shipped with SpeechForge)
+
+Client time-to-first-audio over HTTP streaming, GPU 1, median of 5, graph shapes warmed:
+
+| build | 12.6 s reference, cold | 12.6 s reference, cached | no reference |
+| --- | --- | --- | --- |
+| 13.4 stock | 879 ms | 802 (no cache) | 113 |
+| 13.4 patched | 1001 | **124** | 172 (110-170 between runs) |
+| 13.1 stock | 136 | 138 (no cache) | 83 |
+| 13.1 patched | 188 | **79** | 82 |
+
+Hit on 13.1: restore 1.5-1.8 ms, suffix pre-fill (21-23 rows) 38-50 ms, total 73-86 ms.
+Cold and cached takes are byte-identical for the same seed (CLI, 13.1 build; CPU backend
+too); the split pre-fill differs from the single pass by 6.4 % in activations, inside the
+model's own 4.8-5.7 % step-to-step rounding noise (a planted bug reads 28 %). Through the
+SpeechForge adapter (13.1 patched, `seed` 11): 12.6 s clip 95 / 107 ms on repeats (first unit
+377 with the one-time encode and prefix save), a kept 3.9 s take 80 ms on repeat, RTF
+0.34-0.35. Takes in `quality-2026-10-15-drama3/s34-*.wav` (overwritten by the last run).
