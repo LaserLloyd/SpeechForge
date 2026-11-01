@@ -1,5 +1,7 @@
 # SpeechForge
 
+[![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
+
 A GPU speech server for realtime voice chat: **streaming speech-to-text** (NVIDIA Parakeet TDT
 0.6B v2, rolling partials every 160 ms, finals with word timings), **semantic end-of-turn**
 (Smart Turn v3.2, consulted after a silence floor the client cannot lower) and **streaming
@@ -134,7 +136,7 @@ push and the CI run). A fork adds its own identifiers to the git-ignored
 
 ## Licences
 
-SpeechForge is MIT (`LICENSE`). Models are fetched at pinned revisions, not shipped:
+SpeechForge is MIT-0, MIT No Attribution (`LICENSE`): use it any way you like, nothing to credit or keep. Models are fetched at pinned revisions, not shipped:
 Chatterbox-Turbo (MIT, Resemble AI); Parakeet TDT 0.6B v2 (CC-BY-4.0, NVIDIA; ONNX conversion
 by istupakov, CC-BY-4.0); Smart Turn v3.2 (BSD-2); Silero VAD (MIT). The shipped self-test clip
 is synthetic Kokoro-82M speech (Apache-2.0 weights). Attribution:

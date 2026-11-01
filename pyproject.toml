@@ -6,7 +6,7 @@ version = "0.3.0"
 description = "A small GPU speech server: Parakeet TDT speech-to-text and Chatterbox-Turbo streaming text-to-speech over ONNX Runtime, cooperating with StudioForge through its GPU lease API."
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = "MIT-0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 keywords = ["speech", "tts", "stt", "onnxruntime", "openai-compatible", "gpu", "voice-chat", "websocket", "parakeet", "chatterbox"]
 classifiers = [

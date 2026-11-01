@@ -54,7 +54,7 @@ The changelog gets the big call right: a separate rig process that is a lease te
 
 ### 1.2 What the changelog got right (kept)
 
-- SpeechForge is a separate process: not inside StudioForge, a lease tenant like any other rig workload, MIT, author "Laser Lloyd".
+- SpeechForge is a separate process: not inside StudioForge, a lease tenant like any other rig workload, MIT-0, author "Laser Lloyd".
 - "Voice never waits on the rig." The CPU path is always installed. `503` with `Retry-After` is never a hang.
 - The lease lifecycle: warm on chat open, touch while busy, idle unload, and D56 vacate.
 - Voices are content-addressed by sha256, idempotent `PUT`, `HEAD` to skip the upload.

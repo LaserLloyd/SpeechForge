@@ -1,6 +1,6 @@
 # Third-party notices
 
-SpeechForge's own code is MIT (see `LICENSE`). It downloads and runs models and
+SpeechForge's own code is MIT-0, MIT No Attribution (see `LICENSE`). It downloads and runs models and
 libraries that carry their own licences. None of the model weights are in this
 repository; `speechforge fetch-models` fetches them from their publishers at
 pinned revisions.
