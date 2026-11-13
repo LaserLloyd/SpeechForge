@@ -358,7 +358,7 @@ restart and stop are file requests the supervisor honours (`state/restart.reques
 stop applies only to a supervisor the tray launched. `install.ps1` points the Startup entry at
 `SpeechForge Tray.bat`; `Start SpeechForge.bat` (console) is unchanged.
 
-**Why.** The host already shows ClawChat, ClawForge and StudioForge as icons; a console
+**Why.** The host already shows its other services as tray icons; a console
 window for the fourth service was the odd one out, and "is it ready, is anything connected,
 did the lease go" should be a glance, not a `curl`. Adopt-or-launch keeps one supervisor per
 port whichever launcher started it.
